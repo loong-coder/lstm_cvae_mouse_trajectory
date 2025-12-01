@@ -27,6 +27,15 @@ class TrajectoryPoint:
     direction: float
     duration: float = 0.0
 
+    def __post_init__(self):
+        """确保所有数值都是Python原生float类型"""
+        self.x = float(self.x)
+        self.y = float(self.y)
+        self.timestamp = float(self.timestamp)
+        self.speed = float(self.speed)
+        self.direction = float(self.direction)
+        self.duration = float(self.duration)
+
     def distance_to(self, other: 'TrajectoryPoint') -> float:
         """计算到另一个点的欧氏距离"""
         return math.sqrt((self.x - other.x)**2 + (self.y - other.y)**2)

@@ -65,7 +65,7 @@ class HumanMouseController:
             point = trajectory[i]
 
             # 计算移动持续时间（考虑速度倍数）
-            duration = point.duration / speed_multiplier
+            duration = float(point.duration) / speed_multiplier
 
             # 限制在合理范围内
             duration = max(min_duration, min(max_duration, duration))
@@ -222,7 +222,7 @@ class HumanMouseController:
             # 拖动到每个点
             for i in range(1, len(trajectory)):
                 point = trajectory[i]
-                duration = max(0.001, point.duration / speed_multiplier)
+                duration = max(0.001, float(point.duration) / speed_multiplier)
 
                 pyautogui.moveTo(
                     int(point.x),
