@@ -1,70 +1,10 @@
 """
-模型定义 - LSTM+CVAE组合模型和轨迹长度预测网络
+模型定义 - LSTM+CVAE组合模型（集成轨迹长度预测）
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config.config import Config
-
-
-def create_length_predictor(hidden_dim=64, min_length=10, max_length=500):
-    """
-    创建轨迹长度预测器（使用 Sequential 简化）
-
-    核心思想：轨迹点数主要取决于起点到终点的距离
-    输入：距离（1维标量）
-    输出：预测的轨迹长度
-
-    Args:
-        hidden_dim: 隐藏层维度
-        min_length: 最小轨迹长度
-        max_length: 最大轨迹长度
-
-    Returns:
-        predictor: Sequential 模型
-        predictor_config: 配置字典（包含min_length和max_length）
-    """
-    predictor = nn.Sequential(
-        nn.Linear(1, hidden_dim),
-        nn.ReLU(),
-        nn.Linear(hidden_dim, 1),
-        nn.Sigmoid()  # 输出 [0, 1]
-    )
-
-    # 返回模型和配置
-    config = {
-        'min_length': min_length,
-        'max_length': max_length
-    }
-
-    return predictor, config
-
-
-def predict_trajectory_length(predictor, predictor_config, start_point, end_point):
-    """
-    使用长度预测器预测轨迹长度
-
-    Args:
-        predictor: Sequential 预测器模型
-        predictor_config: 配置字典
-        start_point: (batch, 2) 起点坐标
-        end_point: (batch, 2) 终点坐标
-
-    Returns:
-        predicted_length: (batch,) 预测的轨迹长度
-    """
-    # 计算欧氏距离
-    distance = torch.sqrt(torch.sum((end_point - start_point)**2, dim=1, keepdim=True))
-
-    # 预测归一化长度 [0, 1]
-    normalized_length = predictor(distance).squeeze(-1)
-
-    # 反归一化到实际长度范围
-    min_length = predictor_config['min_length']
-    max_length = predictor_config['max_length']
-    predicted_length = min_length + normalized_length * (max_length - min_length)
-
-    return predicted_length
 
 
 class CVAEEncoder(nn.Module):
@@ -164,7 +104,7 @@ class LSTMCVAE(nn.Module):
             latent_dim=config.LATENT_DIM
         )
 
-        # CVAE解码器（输出11维：start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance）
+        # CVAE解码器（输出12维：start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance, remaining_points）
         self.decoder = CVAEDecoder(
             latent_dim=config.LATENT_DIM,
             lstm_hidden_dim=config.LSTM_HIDDEN_DIM,
@@ -234,11 +174,14 @@ class LSTMCVAE(nn.Module):
         c = torch.zeros(self.config.LSTM_NUM_LAYERS, batch_size, self.config.LSTM_HIDDEN_DIM).to(device)
 
         # 第一个点：手动构造起点
+        # 剩余点数：还需要生成 trajectory_length - 1 个点
+        remaining_points_tensor = torch.full((batch_size, 1), trajectory_length - 1, dtype=torch.float32).to(device)
         first_point = torch.cat([
             start_point,  # start_x, start_y
             end_point,    # end_x, end_y
             start_point,  # current_x, current_y = start_x, start_y
-            torch.zeros(batch_size, 5).to(device)  # velocity, acceleration, sin_dir, cos_dir, distance = 0
+            torch.zeros(batch_size, 5).to(device),  # velocity, acceleration, sin_dir, cos_dir, distance = 0
+            remaining_points_tensor  # remaining_points = trajectory_length - 1
         ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
         generated_trajectory.append(first_point)
 
@@ -248,7 +191,10 @@ class LSTMCVAE(nn.Module):
         # 从第2个点开始预测（第1个点已经是起点）
         for t in range(trajectory_length - 1):
             # 构建当前时间步的输入特征
-            # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
+            # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance, remaining_points]
+
+            # 计算剩余点数（不包括当前点）
+            remaining_steps = trajectory_length - 1 - t
 
             # 计算到起点的距离（与训练数据一致）
             dx_to_start = current_pos[:, 0:1] - start_point[:, 0:1]
@@ -291,6 +237,7 @@ class LSTMCVAE(nn.Module):
                 acceleration = (velocity - prev_velocity) * 100
 
             # 构建输入向量
+            remaining_points_current = torch.full((batch_size, 1), remaining_steps, dtype=torch.float32).to(device)
             x_t = torch.cat([
                 start_point,  # start_x, start_y
                 end_point,    # end_x, end_y
@@ -299,7 +246,8 @@ class LSTMCVAE(nn.Module):
                 acceleration,
                 sin_direction,
                 cos_direction,
-                distance  # 到起点的距离，与训练数据一致
+                distance,  # 到起点的距离，与训练数据一致
+                remaining_points_current  # 剩余点数
             ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
 
             # LSTM前向
@@ -312,7 +260,6 @@ class LSTMCVAE(nn.Module):
             predicted_pos = output[:, 0, 4:6]  # 模型预测的下一个位置
 
             # 计算理想的步长（根据剩余距离和剩余步数）
-            remaining_steps = trajectory_length - 1 - t
             if remaining_steps > 0:
                 # 理想步长：剩余距离 / 剩余步数
                 ideal_step_length = distance_to_end / remaining_steps
@@ -462,13 +409,6 @@ if __name__ == '__main__':
     config = Config()
     model = LSTMCVAE(config)
 
-    # 创建长度预测器
-    length_predictor, predictor_config = create_length_predictor(
-        hidden_dim=64,
-        min_length=10,
-        max_length=500
-    )
-
     # 创建测试数据
     batch_size = 4
     seq_len = 50
@@ -485,7 +425,3 @@ if __name__ == '__main__':
     # 测试生成
     generated = model.generate(start_point, end_point, trajectory_length=30)
     print(f"生成轨迹形状: {generated.shape}")
-
-    # 测试长度预测器
-    predicted_length = predict_trajectory_length(length_predictor, predictor_config, start_point, end_point)
-    print(f"预测长度: {predicted_length}")

@@ -67,8 +67,9 @@ class MouseTrajectoryDataset(Dataset):
             dict: 包含特征和目标的字典
         """
         features = []
+        total_length = len(group_data)  # 轨迹总长度
 
-        for idx, row in group_data.iterrows():
+        for point_idx, (idx, row) in enumerate(group_data.iterrows()):
             # 基础坐标
             start_x = row['start_x']
             start_y = row['start_y']
@@ -104,14 +105,18 @@ class MouseTrajectoryDataset(Dataset):
             # 计算相对距离
             distance = math.sqrt((current_x - start_x)**2 + (current_y - start_y)**2)
 
-            # 组合特征向量 [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
+            # 计算剩余点数（从当前点到终点还需要多少个点，不包括当前点）
+            remaining_points = total_length - point_idx - 1
+
+            # 组合特征向量 [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance, remaining_points]
             feature_vector = [
                 start_x, start_y,
                 end_x, end_y,
                 current_x, current_y,
                 velocity, acceleration,
                 sin_dir, cos_dir,  # 使用sin和cos替代原始角度
-                distance
+                distance,
+                remaining_points  # 新增：剩余点数特征
             ]
 
             features.append(feature_vector)
@@ -132,7 +137,7 @@ class MouseTrajectoryDataset(Dataset):
             end_point = (end_point - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
 
         return {
-            'features': features,  # (seq_len, feature_dim=11)
+            'features': features,  # (seq_len, feature_dim=12)
             'start_point': start_point,  # (2,)
             'end_point': end_point,  # (2,)
             'length': len(features)  # 轨迹长度

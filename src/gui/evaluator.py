@@ -8,7 +8,7 @@ import math
 import time
 
 from config.config import Config
-from src.models.lstm_cvae import LSTMCVAE, create_length_predictor, predict_trajectory_length
+from src.models.lstm_cvae import LSTMCVAE
 from src.utils.trajectory_utils import TrajectoryExtractor, TrajectoryComparator
 
 
@@ -61,21 +61,6 @@ class TrajectoryEvaluationGUI:
         self.model = LSTMCVAE(self.config).to(self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.eval()
-
-        # 加载长度预测器（使用新的函数式API）
-        self.length_predictor, self.predictor_config = create_length_predictor(
-            hidden_dim=self.config.LENGTH_PREDICTOR_HIDDEN_DIM,
-            min_length=10,
-            max_length=self.config.MAX_TRAJECTORY_LENGTH
-        )
-        self.length_predictor = self.length_predictor.to(self.device)
-        self.length_predictor.load_state_dict(checkpoint['length_predictor_state_dict'])
-
-        # 尝试加载配置，如果不存在就使用创建时的配置
-        if 'predictor_config' in checkpoint:
-            self.predictor_config = checkpoint['predictor_config']
-
-        self.length_predictor.eval()
 
         self.norm_stats = checkpoint.get('norm_stats', None)
 
@@ -369,19 +354,11 @@ class TrajectoryEvaluationGUI:
             start_tensor = torch.FloatTensor(start_np).to(self.device)
             end_tensor = torch.FloatTensor(end_np).to(self.device)
 
-            # 预测轨迹长度
-            with torch.no_grad():
-                predicted_length = predict_trajectory_length(
-                    self.length_predictor,
-                    self.predictor_config,
-                    start_tensor,
-                    end_tensor
-                )
-                raw_prediction = predicted_length.item()
-                trajectory_length = int(raw_prediction)
-                trajectory_length = max(10, min(trajectory_length, self.config.MAX_TRAJECTORY_LENGTH))
+            # 使用人类轨迹的点数作为AI生成的目标长度
+            trajectory_length = len(self.human_trajectory)
+            trajectory_length = max(10, min(trajectory_length, self.config.MAX_TRAJECTORY_LENGTH))
 
-            print(f"原始预测长度: {raw_prediction:.2f}, 调整后长度: {trajectory_length}")
+            print(f"使用人类轨迹点数作为生成长度: {trajectory_length}")
 
             # 生成多条轨迹
             for i in range(num_traj):

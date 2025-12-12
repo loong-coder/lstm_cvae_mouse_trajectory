@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from config.config import Config
 from src.data.dataset import create_data_loaders
-from src.models.lstm_cvae import LSTMCVAE, create_length_predictor, predict_trajectory_length, compute_loss
+from src.models.lstm_cvae import LSTMCVAE, compute_loss
 
 
 class Trainer:
@@ -31,21 +31,12 @@ class Trainer:
             train_split=config.TRAIN_SPLIT
         )
 
-        # 初始化模型
+        # 初始化模型（长度预测器已集成在模型中）
         print("初始化模型...")
         self.model = LSTMCVAE(config).to(self.device)
 
-        # 创建长度预测器（使用 Sequential）
-        self.length_predictor, self.predictor_config = create_length_predictor(
-            hidden_dim=config.LENGTH_PREDICTOR_HIDDEN_DIM,
-            min_length=10,
-            max_length=config.MAX_TRAJECTORY_LENGTH
-        )
-        self.length_predictor = self.length_predictor.to(self.device)
-
-        # 优化器
+        # 优化器（包含所有参数，包括集成的长度预测器）
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.LEARNING_RATE)
-        self.length_optimizer = optim.Adam(self.length_predictor.parameters(), lr=config.LEARNING_RATE)
 
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(

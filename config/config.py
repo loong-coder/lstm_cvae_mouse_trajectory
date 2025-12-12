@@ -11,8 +11,8 @@ class Config:
     DATA_FILE = os.path.join(PROJECT_ROOT, 'mouse_trajectories.csv')
 
     # 特征维度
-    # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance
-    INPUT_DIM = 11  # 改为11维（direction拆分为sin和cos）
+    # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance, remaining_points
+    INPUT_DIM = 12  # 改为12维（新增remaining_points特征）
 
     # LSTM参数
     LSTM_HIDDEN_DIM = 128
@@ -40,6 +40,12 @@ class Config:
 
     # KL散度权重（CVAE损失）
     KL_WEIGHT = 0.001
+
+    # 损失函数权重
+    ENDPOINT_WEIGHT = 1.0  # 终点损失权重
+    SMOOTHNESS_WEIGHT = 0.1  # 平滑度损失权重
+    LENGTH_CONSISTENCY_WEIGHT = 5.0  # 长度一致性损失权重（主模型训练时，使模型生成的轨迹点数接近预测的点数）
+    LENGTH_PREDICTOR_WEIGHT = 2.0  # 长度预测器损失权重（训练长度预测器时使用的权重）
 
     # 模型保存路径
     MODEL_SAVE_PATH = os.path.join(PROJECT_ROOT, 'models/')

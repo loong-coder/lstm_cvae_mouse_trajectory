@@ -1,7 +1,7 @@
 """
-模型包 - 包含LSTM-CVAE模型和轨迹长度预测器
+模型包 - 包含LSTM-CVAE模型（集成轨迹长度预测）
 """
 
-from .lstm_cvae import LSTMCVAE, create_length_predictor, predict_trajectory_length, compute_loss
+from .lstm_cvae import LSTMCVAE, compute_loss
 
-__all__ = ['LSTMCVAE', 'create_length_predictor', 'predict_trajectory_length', 'compute_loss']
+__all__ = ['LSTMCVAE', 'compute_loss']
