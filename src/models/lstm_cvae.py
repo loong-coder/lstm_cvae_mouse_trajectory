@@ -202,22 +202,23 @@ class LSTMCVAE(nn.Module):
 
         return reconstructed, mu, logvar
 
-    def generate(self, start_point, end_point, trajectory_length, num_samples=1):
+    def generate(self, start_point, end_point, trajectory_length, num_samples=1, endpoint_guidance_weight=0.3):
         """
-        生成模式：给定起点和终点，生成轨迹
+        生成模式：给定起点和终点，生成轨迹（带终点引导）
         Args:
-            start_point: (batch, 2) 起点坐标
-            end_point: (batch, 2) 终点坐标
-            trajectory_length: int 轨迹长度
+            start_point: (batch, 2) 起点坐标（归一化）
+            end_point: (batch, 2) 终点坐标（归一化）
+            trajectory_length: int 轨迹长度（包括起点）
             num_samples: int 生成样本数量
+            endpoint_guidance_weight: float 终点引导权重（0-1），越大越倾向于直接走向终点
         Returns:
             generated_trajectory: (batch, trajectory_length, input_dim) 生成的轨迹
         """
         batch_size = start_point.shape[0]
         device = start_point.device
 
-        # 从标准正态分布采样潜在变量
-        z = torch.randn(batch_size, self.config.LATENT_DIM).to(device)
+        # 从标准正态分布采样潜在变量（减小方差以提高稳定性）
+        z = torch.randn(batch_size, self.config.LATENT_DIM).to(device) * 0.8
 
         # 创建初始输入序列（从起点开始）
         current_pos = start_point.clone()  # (batch, 2)
@@ -228,7 +229,17 @@ class LSTMCVAE(nn.Module):
         h = torch.zeros(self.config.LSTM_NUM_LAYERS, batch_size, self.config.LSTM_HIDDEN_DIM).to(device)
         c = torch.zeros(self.config.LSTM_NUM_LAYERS, batch_size, self.config.LSTM_HIDDEN_DIM).to(device)
 
-        for t in range(trajectory_length):
+        # 第一个点：手动构造起点
+        first_point = torch.cat([
+            start_point,  # start_x, start_y
+            end_point,    # end_x, end_y
+            start_point,  # current_x, current_y = start_x, start_y
+            torch.zeros(batch_size, 5).to(device)  # velocity, acceleration, sin_dir, cos_dir, distance = 0
+        ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
+        generated_trajectory.append(first_point)
+
+        # 从第2个点开始预测（第1个点已经是起点）
+        for t in range(trajectory_length - 1):
             # 构建当前时间步的输入特征
             # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
 
@@ -243,7 +254,7 @@ class LSTMCVAE(nn.Module):
             distance_to_end = torch.sqrt(dx_to_end**2 + dy_to_end**2 + 1e-8)
 
             if t == 0:
-                # 第一步：使用从起点到终点的方向作为初始方向
+                # 第一步（实际是第二个点）：使用从起点到终点的方向作为初始方向
                 direction_rad = torch.atan2(dy_to_end, dx_to_end)
                 sin_direction = torch.sin(direction_rad)
                 cos_direction = torch.cos(direction_rad)
@@ -286,10 +297,33 @@ class LSTMCVAE(nn.Module):
             # CVAE解码
             output = self.decoder(z, lstm_out)  # (batch, 1, input_dim)
 
+            # 终点引导：在接近结尾时，逐渐引导轨迹向终点靠拢
+            progress = (t + 1) / (trajectory_length - 1)  # 0到1的进度
+            if progress > 0.7:  # 在最后30%的步骤中启用强引导
+                guidance_strength = (progress - 0.7) / 0.3 * endpoint_guidance_weight
+
+                # 提取预测的下一个位置
+                predicted_pos = output[:, 0, 4:6]
+
+                # 计算从当前预测位置到终点的向量
+                to_endpoint = end_point - predicted_pos
+
+                # 应用引导：将预测位置向终点拉近
+                guided_pos = predicted_pos + to_endpoint * guidance_strength
+
+                # 更新output中的current_x, current_y
+                output[:, 0, 4:6] = guided_pos
+
             generated_trajectory.append(output)
 
-            # 更新当前位置为预测的下一个位置
+            # 更新当前位置为预测的下一个位置（已经过引导）
             current_pos = output[:, 0, 4:6]  # 取current_x, current_y
+
+        # 最后一个点：强制设置为终点
+        if trajectory_length > 1:
+            last_point = generated_trajectory[-1].clone()
+            last_point[:, 0, 4:6] = end_point  # 强制设置 current_x, current_y 为终点
+            generated_trajectory[-1] = last_point
 
         # 拼接所有时间步
         generated_trajectory = torch.cat(generated_trajectory, dim=1)  # (batch, trajectory_length, input_dim)

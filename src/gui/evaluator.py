@@ -374,12 +374,22 @@ class TrajectoryEvaluationGUI:
             for i in range(num_traj):
                 print(f"  生成第 {i+1}/{num_traj} 条轨迹...")
                 with torch.no_grad():
-                    ai_output = self.model.generate(start_tensor, end_tensor, trajectory_length)
+                    # 使用终点引导和减小的随机性
+                    ai_output = self.model.generate(
+                        start_tensor, end_tensor, trajectory_length,
+                        endpoint_guidance_weight=0.5  # 增加终点引导强度
+                    )
 
-                # 提取轨迹点
+                # 提取轨迹坐标
                 ai_coords = self.extractor.extract_coordinates_only(ai_output)
-                self.ai_trajectories.append(ai_coords)
-                print(f"    提取坐标数量: {len(ai_coords)}")
+
+                # 应用高斯平滑以提高轨迹质量
+                ai_coords_smoothed = TrajectoryExtractor.smooth_trajectory_gaussian(
+                    ai_coords, sigma=1.5
+                )
+
+                self.ai_trajectories.append(ai_coords_smoothed)
+                print(f"    提取坐标数量: {len(ai_coords_smoothed)}")
 
             # 绘制所有AI轨迹
             self.draw_ai_trajectories(self.ai_trajectories)

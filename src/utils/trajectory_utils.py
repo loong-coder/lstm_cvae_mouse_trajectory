@@ -242,6 +242,62 @@ class TrajectoryExtractor:
 
         return interpolated_coords
 
+    @staticmethod
+    def smooth_trajectory(coords, window_size=5, poly_order=2):
+        """
+        使用Savitzky-Golay滤波器平滑轨迹
+        Args:
+            coords: (n, 2) numpy数组，轨迹坐标
+            window_size: 滤波窗口大小（奇数），越大越平滑
+            poly_order: 多项式阶数，通常为2或3
+        Returns:
+            smoothed_coords: (n, 2) 平滑后的坐标
+        """
+        from scipy.signal import savgol_filter
+
+        if len(coords) < window_size:
+            return coords
+
+        # 确保window_size是奇数
+        if window_size % 2 == 0:
+            window_size += 1
+
+        # 确保window_size不超过轨迹长度
+        window_size = min(window_size, len(coords))
+        if window_size <= poly_order:
+            return coords
+
+        # 分别平滑x和y坐标
+        smoothed_x = savgol_filter(coords[:, 0], window_size, poly_order)
+        smoothed_y = savgol_filter(coords[:, 1], window_size, poly_order)
+
+        smoothed_coords = np.column_stack([smoothed_x, smoothed_y])
+
+        return smoothed_coords
+
+    @staticmethod
+    def smooth_trajectory_gaussian(coords, sigma=2.0):
+        """
+        使用高斯滤波器平滑轨迹
+        Args:
+            coords: (n, 2) numpy数组，轨迹坐标
+            sigma: 高斯核标准差，越大越平滑
+        Returns:
+            smoothed_coords: (n, 2) 平滑后的坐标
+        """
+        from scipy.ndimage import gaussian_filter1d
+
+        if len(coords) < 3:
+            return coords
+
+        # 分别平滑x和y坐标
+        smoothed_x = gaussian_filter1d(coords[:, 0], sigma=sigma)
+        smoothed_y = gaussian_filter1d(coords[:, 1], sigma=sigma)
+
+        smoothed_coords = np.column_stack([smoothed_x, smoothed_y])
+
+        return smoothed_coords
+
 
 class TrajectoryComparator:
     """
