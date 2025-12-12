@@ -204,7 +204,7 @@ class LSTMCVAE(nn.Module):
 
     def generate(self, start_point, end_point, trajectory_length, num_samples=1, endpoint_guidance_weight=0.3):
         """
-        生成模式：给定起点和终点，生成轨迹（带终点引导）
+        生成模式：给定起点和终点，生成轨迹（带持续终点逼近）
         Args:
             start_point: (batch, 2) 起点坐标（归一化）
             end_point: (batch, 2) 终点坐标（归一化）
@@ -238,6 +238,9 @@ class LSTMCVAE(nn.Module):
         ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
         generated_trajectory.append(first_point)
 
+        # 计算总距离用于归一化步长
+        total_distance_to_end = torch.sqrt(torch.sum((end_point - start_point)**2, dim=1, keepdim=True))
+
         # 从第2个点开始预测（第1个点已经是起点）
         for t in range(trajectory_length - 1):
             # 构建当前时间步的输入特征
@@ -252,6 +255,10 @@ class LSTMCVAE(nn.Module):
             dx_to_end = end_point[:, 0:1] - current_pos[:, 0:1]
             dy_to_end = end_point[:, 1:2] - current_pos[:, 1:2]
             distance_to_end = torch.sqrt(dx_to_end**2 + dy_to_end**2 + 1e-8)
+
+            # 计算当前进度（已走过的距离占比）
+            progress = 1.0 - (distance_to_end / (total_distance_to_end + 1e-8))
+            progress = torch.clamp(progress, 0.0, 1.0)
 
             if t == 0:
                 # 第一步（实际是第二个点）：使用从起点到终点的方向作为初始方向
@@ -297,29 +304,52 @@ class LSTMCVAE(nn.Module):
             # CVAE解码
             output = self.decoder(z, lstm_out)  # (batch, 1, input_dim)
 
-            # 终点引导：在接近结尾时，逐渐引导轨迹向终点靠拢
-            progress = (t + 1) / (trajectory_length - 1)  # 0到1的进度
-            if progress > 0.7:  # 在最后30%的步骤中启用强引导
-                guidance_strength = (progress - 0.7) / 0.3 * endpoint_guidance_weight
+            # 持续终点逼近：在每一步都使用当前点和终点的关系来引导
+            predicted_pos = output[:, 0, 4:6]  # 模型预测的下一个位置
 
-                # 提取预测的下一个位置
-                predicted_pos = output[:, 0, 4:6]
+            # 计算理想的步长（根据剩余距离和剩余步数）
+            remaining_steps = trajectory_length - 1 - t
+            if remaining_steps > 0:
+                # 理想步长：剩余距离 / 剩余步数
+                ideal_step_length = distance_to_end / remaining_steps
+            else:
+                ideal_step_length = distance_to_end
 
-                # 计算从当前预测位置到终点的向量
-                to_endpoint = end_point - predicted_pos
+            # 计算朝向终点的单位向量
+            direction_to_end = torch.cat([dx_to_end, dy_to_end], dim=1)  # (batch, 2)
+            direction_to_end_normalized = direction_to_end / (distance_to_end + 1e-8)
 
-                # 应用引导：将预测位置向终点拉近
-                guided_pos = predicted_pos + to_endpoint * guidance_strength
+            # 计算理想的下一个位置（沿着终点方向移动理想步长）
+            ideal_next_pos = current_pos + direction_to_end_normalized * ideal_step_length
 
-                # 更新output中的current_x, current_y
-                output[:, 0, 4:6] = guided_pos
+            # 动态调整引导强度：
+            # - 早期（前50%）：较弱引导，保持自然性
+            # - 中期（50%-80%）：中等引导
+            # - 后期（80%-100%）：强引导，确保到达终点
+            time_progress = (t + 1) / (trajectory_length - 1)
+            if time_progress < 0.5:
+                dynamic_weight = endpoint_guidance_weight * 0.3  # 30%强度
+            elif time_progress < 0.8:
+                dynamic_weight = endpoint_guidance_weight * 0.6  # 60%强度
+            else:
+                dynamic_weight = endpoint_guidance_weight * 1.0  # 100%强度
+
+            # 混合模型预测和理想位置
+            guided_pos = predicted_pos * (1 - dynamic_weight) + ideal_next_pos * dynamic_weight
+
+            # 如果距离终点非常近（小于一个步长），直接走向终点
+            if distance_to_end < ideal_step_length * 0.5:
+                guided_pos = end_point
+
+            # 更新output中的current_x, current_y
+            output[:, 0, 4:6] = guided_pos
 
             generated_trajectory.append(output)
 
-            # 更新当前位置为预测的下一个位置（已经过引导）
-            current_pos = output[:, 0, 4:6]  # 取current_x, current_y
+            # 更新当前位置为引导后的位置
+            current_pos = guided_pos
 
-        # 最后一个点：强制设置为终点
+        # 最后一个点：强制设置为终点（确保精确到达）
         if trajectory_length > 1:
             last_point = generated_trajectory[-1].clone()
             last_point[:, 0, 4:6] = end_point  # 强制设置 current_x, current_y 为终点
