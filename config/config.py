@@ -31,8 +31,12 @@ class Config:
     # 训练参数
     BATCH_SIZE = 32
     LEARNING_RATE = 0.001
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 200  # 最大训练轮数
     TRAIN_SPLIT = 0.8  # 训练集比例
+
+    # Early Stopping 参数
+    EARLY_STOPPING_PATIENCE = 20  # 连续20次不改善则停止训练
+    MIN_DELTA = 1e-4  # 最小改善阈值
 
     # KL散度权重（CVAE损失）
     KL_WEIGHT = 0.001

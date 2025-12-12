@@ -7,60 +7,64 @@ import torch.nn.functional as F
 from config.config import Config
 
 
-class TrajectoryLengthPredictor(nn.Module):
+def create_length_predictor(hidden_dim=64, min_length=10, max_length=500):
     """
-    辅助网络：预测轨迹点的个数
-    输入：起点和终点坐标
+    创建轨迹长度预测器（使用 Sequential 简化）
+
+    核心思想：轨迹点数主要取决于起点到终点的距离
+    输入：距离（1维标量）
     输出：预测的轨迹长度
 
-    优化版本：增加网络深度和宽度，添加距离特征
+    Args:
+        hidden_dim: 隐藏层维度
+        min_length: 最小轨迹长度
+        max_length: 最大轨迹长度
+
+    Returns:
+        predictor: Sequential 模型
+        predictor_config: 配置字典（包含min_length和max_length）
     """
-    def __init__(self, input_dim=4, hidden_dim=128, max_length=500):
-        super(TrajectoryLengthPredictor, self).__init__()
+    predictor = nn.Sequential(
+        nn.Linear(1, hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, 1),
+        nn.Sigmoid()  # 输出 [0, 1]
+    )
 
-        # 增加隐藏层深度和宽度
-        self.fc1 = nn.Linear(input_dim + 1, hidden_dim)  # +1 for distance feature
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.fc4 = nn.Linear(hidden_dim // 2, 1)  # 输出一个长度值
+    # 返回模型和配置
+    config = {
+        'min_length': min_length,
+        'max_length': max_length
+    }
 
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.3)
-        self.batch_norm1 = nn.BatchNorm1d(hidden_dim)
-        self.batch_norm2 = nn.BatchNorm1d(hidden_dim)
-        self.max_length = max_length
+    return predictor, config
 
-    def forward(self, start_point, end_point):
-        """
-        Args:
-            start_point: (batch, 2) 起点坐标
-            end_point: (batch, 2) 终点坐标
-        Returns:
-            predicted_length: (batch,) 预测的轨迹长度
-        """
-        # 计算起点到终点的欧氏距离作为额外特征
-        distance = torch.sqrt(torch.sum((end_point - start_point)**2, dim=1, keepdim=True))
 
-        # 拼接起点、终点和距离
-        x = torch.cat([start_point, end_point, distance], dim=1)  # (batch, 5)
+def predict_trajectory_length(predictor, predictor_config, start_point, end_point):
+    """
+    使用长度预测器预测轨迹长度
 
-        x = self.fc1(x)
-        x = self.batch_norm1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
+    Args:
+        predictor: Sequential 预测器模型
+        predictor_config: 配置字典
+        start_point: (batch, 2) 起点坐标
+        end_point: (batch, 2) 终点坐标
 
-        x = self.fc2(x)
-        x = self.batch_norm2(x)
-        x = self.relu(x)
-        x = self.dropout(x)
+    Returns:
+        predicted_length: (batch,) 预测的轨迹长度
+    """
+    # 计算欧氏距离
+    distance = torch.sqrt(torch.sum((end_point - start_point)**2, dim=1, keepdim=True))
 
-        x = self.relu(self.fc3(x))
-        x = self.fc4(x)  # (batch, 1)
+    # 预测归一化长度 [0, 1]
+    normalized_length = predictor(distance).squeeze(-1)
 
-        # 使用ReLU确保长度为正，并限制最大长度
-        predicted_length = torch.clamp(x.squeeze(-1), min=1, max=self.max_length)
+    # 反归一化到实际长度范围
+    min_length = predictor_config['min_length']
+    max_length = predictor_config['max_length']
+    predicted_length = min_length + normalized_length * (max_length - min_length)
 
-        return predicted_length
+    return predicted_length
 
 
 class CVAEEncoder(nn.Module):
@@ -361,9 +365,10 @@ class LSTMCVAE(nn.Module):
         return generated_trajectory
 
 
-def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001, endpoint_weight=1.0, smoothness_weight=0.1):
+def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001, endpoint_weight=1.0, smoothness_weight=0.1,
+                 predicted_length=None, length_weight=0.5):
     """
-    增强的CVAE损失：重建损失 + KL散度损失 + 终点损失 + 平滑度损失
+    增强的CVAE损失：重建损失 + KL散度损失 + 终点损失 + 平滑度损失 + 长度一致性损失
     Args:
         reconstructed: (batch, seq_len, input_dim) 重建的轨迹
         target: (batch, seq_len, input_dim) 目标轨迹
@@ -373,12 +378,15 @@ def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001, endpo
         kl_weight: KL散度的权重
         endpoint_weight: 终点损失的权重
         smoothness_weight: 平滑度损失的权重
+        predicted_length: (batch,) 预测的轨迹长度（可选）
+        length_weight: 长度一致性损失的权重
     Returns:
         total_loss: 总损失
         recon_loss: 重建损失
         kl_loss: KL散度损失
         endpoint_loss: 终点损失
         smoothness_loss: 平滑度损失
+        length_loss: 长度一致性损失
     """
     # 1. 重建损失（MSE）
     recon_loss_raw = F.mse_loss(reconstructed, target, reduction='none')  # (batch, seq_len, input_dim)
@@ -426,17 +434,40 @@ def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001, endpo
         # 平滑度损失：加速度的平方和
         smoothness_loss = torch.mean(acceleration ** 2)
 
-    # 总损失
-    total_loss = recon_loss + kl_weight * kl_loss + endpoint_weight * endpoint_loss + smoothness_weight * smoothness_loss
+    # 5. 长度一致性损失：确保模型学习到轨迹长度信息
+    length_loss = 0.0
 
-    return total_loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss
+    if predicted_length is not None:
+        # 计算每个样本的实际有效长度（mask中1的数量）
+        actual_lengths = mask.sum(dim=1).float()  # (batch,)
+
+        # 计算长度预测误差（相对误差，考虑到不同轨迹长度差异大）
+        # 使用相对误差而不是绝对误差，避免长轨迹主导损失
+        length_diff = torch.abs(predicted_length - actual_lengths)
+        relative_length_loss = length_diff / (actual_lengths + 1e-8)
+        length_loss = torch.mean(relative_length_loss)
+
+    # 总损失
+    total_loss = (recon_loss +
+                  kl_weight * kl_loss +
+                  endpoint_weight * endpoint_loss +
+                  smoothness_weight * smoothness_loss +
+                  length_weight * length_loss)
+
+    return total_loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, length_loss
 
 
 if __name__ == '__main__':
     # 测试模型
     config = Config()
     model = LSTMCVAE(config)
-    length_predictor = TrajectoryLengthPredictor()
+
+    # 创建长度预测器
+    length_predictor, predictor_config = create_length_predictor(
+        hidden_dim=64,
+        min_length=10,
+        max_length=500
+    )
 
     # 创建测试数据
     batch_size = 4
@@ -456,5 +487,5 @@ if __name__ == '__main__':
     print(f"生成轨迹形状: {generated.shape}")
 
     # 测试长度预测器
-    predicted_length = length_predictor(start_point, end_point)
+    predicted_length = predict_trajectory_length(length_predictor, predictor_config, start_point, end_point)
     print(f"预测长度: {predicted_length}")

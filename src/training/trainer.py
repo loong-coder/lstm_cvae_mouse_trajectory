@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from config.config import Config
 from src.data.dataset import create_data_loaders
-from src.models.lstm_cvae import LSTMCVAE, TrajectoryLengthPredictor, compute_loss
+from src.models.lstm_cvae import LSTMCVAE, create_length_predictor, predict_trajectory_length, compute_loss
 
 
 class Trainer:
@@ -34,11 +34,14 @@ class Trainer:
         # 初始化模型
         print("初始化模型...")
         self.model = LSTMCVAE(config).to(self.device)
-        self.length_predictor = TrajectoryLengthPredictor(
-            input_dim=4,
+
+        # 创建长度预测器（使用 Sequential）
+        self.length_predictor, self.predictor_config = create_length_predictor(
             hidden_dim=config.LENGTH_PREDICTOR_HIDDEN_DIM,
+            min_length=10,
             max_length=config.MAX_TRAJECTORY_LENGTH
-        ).to(self.device)
+        )
+        self.length_predictor = self.length_predictor.to(self.device)
 
         # 优化器
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.LEARNING_RATE)
@@ -58,6 +61,10 @@ class Trainer:
         # 最佳模型跟踪
         self.best_val_loss = float('inf')
 
+        # Early Stopping 跟踪
+        self.patience_counter = 0  # 记录连续多少个epoch没有改善
+        self.best_epoch = 0  # 记录最佳模型是在哪个epoch
+
     def train_epoch(self, epoch):
         """训练一个epoch"""
         self.model.train()
@@ -69,6 +76,7 @@ class Trainer:
         total_length_loss = 0
         total_endpoint_loss = 0
         total_smoothness_loss = 0
+        total_length_consistency_loss = 0
 
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config.NUM_EPOCHS} [Train]')
 
@@ -86,12 +94,23 @@ class Trainer:
             # 前向传播
             reconstructed, mu, logvar = self.model(features, start_point, end_point)
 
-            # 计算损失（使用增强损失）
-            loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss = compute_loss(
+            # 预测轨迹长度（用于长度一致性损失）
+            with torch.no_grad():
+                predicted_lengths = predict_trajectory_length(
+                    self.length_predictor,
+                    self.predictor_config,
+                    start_point,
+                    end_point
+                )
+
+            # 计算损失（使用增强损失，包括长度一致性损失）
+            loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, length_consistency_loss = compute_loss(
                 reconstructed, features, mu, logvar, mask,
                 kl_weight=self.config.KL_WEIGHT,
                 endpoint_weight=1.0,
-                smoothness_weight=0.1
+                smoothness_weight=0.1,
+                predicted_length=predicted_lengths,
+                length_weight=0.5
             )
 
             # 反向传播
@@ -103,10 +122,15 @@ class Trainer:
             self.length_optimizer.zero_grad()
 
             # 预测长度
-            predicted_lengths = self.length_predictor(start_point, end_point)
+            predicted_lengths = predict_trajectory_length(
+                self.length_predictor,
+                self.predictor_config,
+                start_point,
+                end_point
+            )
 
-            # 计算长度预测损失（MSE）
-            length_loss = nn.MSELoss()(predicted_lengths, lengths.float())
+            # 计算长度预测损失（改用 MAE，更适合长度预测）
+            length_loss = nn.L1Loss()(predicted_lengths, lengths.float())
 
             # 反向传播
             length_loss.backward()
@@ -119,6 +143,7 @@ class Trainer:
             total_kl_loss += kl_loss.item()
             total_endpoint_loss += endpoint_loss.item()
             total_smoothness_loss += smoothness_loss.item()
+            total_length_consistency_loss += length_consistency_loss.item()
             total_length_loss += length_loss.item()
 
             # 更新进度条
@@ -126,7 +151,8 @@ class Trainer:
                 'loss': f'{loss.item():.4f}',
                 'recon': f'{recon_loss.item():.4f}',
                 'ep': f'{endpoint_loss.item():.4f}',
-                'len': f'{length_loss.item():.4f}'
+                'len_cons': f'{length_consistency_loss.item():.4f}',
+                'len_pred': f'{length_loss.item():.4f}'
             })
 
         # 平均损失
@@ -135,9 +161,10 @@ class Trainer:
         avg_kl_loss = total_kl_loss / len(self.train_loader)
         avg_endpoint_loss = total_endpoint_loss / len(self.train_loader)
         avg_smoothness_loss = total_smoothness_loss / len(self.train_loader)
+        avg_length_consistency_loss = total_length_consistency_loss / len(self.train_loader)
         avg_length_loss = total_length_loss / len(self.train_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_loss
+        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_consistency_loss, avg_length_loss
 
     def validate(self, epoch):
         """验证"""
@@ -149,6 +176,7 @@ class Trainer:
         total_kl_loss = 0
         total_endpoint_loss = 0
         total_smoothness_loss = 0
+        total_length_consistency_loss = 0
         total_length_loss = 0
 
         with torch.no_grad():
@@ -161,24 +189,38 @@ class Trainer:
                 lengths = batch['length'].to(self.device)
                 mask = batch['mask'].to(self.device)
 
-                # 主模型（使用增强损失）
+                # 主模型（使用增强损失，包括长度一致性损失）
+                predicted_lengths = predict_trajectory_length(
+                    self.length_predictor,
+                    self.predictor_config,
+                    start_point,
+                    end_point
+                )
                 reconstructed, mu, logvar = self.model(features, start_point, end_point)
-                loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss = compute_loss(
+                loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, length_consistency_loss = compute_loss(
                     reconstructed, features, mu, logvar, mask,
                     kl_weight=self.config.KL_WEIGHT,
                     endpoint_weight=1.0,
-                    smoothness_weight=0.1
+                    smoothness_weight=0.1,
+                    predicted_length=predicted_lengths,
+                    length_weight=0.5
                 )
 
                 # 长度预测器
-                predicted_lengths = self.length_predictor(start_point, end_point)
-                length_loss = nn.MSELoss()(predicted_lengths, lengths.float())
+                predicted_lengths = predict_trajectory_length(
+                    self.length_predictor,
+                    self.predictor_config,
+                    start_point,
+                    end_point
+                )
+                length_loss = nn.L1Loss()(predicted_lengths, lengths.float())
 
                 total_loss += loss.item()
                 total_recon_loss += recon_loss.item()
                 total_kl_loss += kl_loss.item()
                 total_endpoint_loss += endpoint_loss.item()
                 total_smoothness_loss += smoothness_loss.item()
+                total_length_consistency_loss += length_consistency_loss.item()
                 total_length_loss += length_loss.item()
 
                 pbar.set_postfix({
@@ -192,20 +234,22 @@ class Trainer:
         avg_kl_loss = total_kl_loss / len(self.val_loader)
         avg_endpoint_loss = total_endpoint_loss / len(self.val_loader)
         avg_smoothness_loss = total_smoothness_loss / len(self.val_loader)
+        avg_length_consistency_loss = total_length_consistency_loss / len(self.val_loader)
         avg_length_loss = total_length_loss / len(self.val_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_loss
+        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_consistency_loss, avg_length_loss
 
     def train(self):
-        """完整训练流程"""
-        print(f"\n开始训练 {self.config.NUM_EPOCHS} 个epochs...\n")
+        """完整训练流程（带 Early Stopping）"""
+        print(f"\n开始训练，最多 {self.config.NUM_EPOCHS} 个epochs...")
+        print(f"Early Stopping: 连续 {self.config.EARLY_STOPPING_PATIENCE} 个epoch无改善将自动停止\n")
 
         for epoch in range(self.config.NUM_EPOCHS):
             # 训练
-            train_loss, train_recon, train_kl, train_ep, train_smooth, train_len = self.train_epoch(epoch)
+            train_loss, train_recon, train_kl, train_ep, train_smooth, train_len_cons, train_len = self.train_epoch(epoch)
 
             # 验证
-            val_loss, val_recon, val_kl, val_ep, val_smooth, val_len = self.validate(epoch)
+            val_loss, val_recon, val_kl, val_ep, val_smooth, val_len_cons, val_len = self.validate(epoch)
 
             # 记录到TensorBoard
             self.writer.add_scalars('Loss/Total', {
@@ -239,20 +283,44 @@ class Trainer:
 
             # 打印统计
             print(f"\nEpoch {epoch+1}/{self.config.NUM_EPOCHS}")
-            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, Endpoint: {train_ep:.4f}, Length: {train_len:.4f}")
-            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, Endpoint: {val_ep:.4f}, Length: {val_len:.4f}")
+            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, Endpoint: {train_ep:.4f}, LenCons: {train_len_cons:.4f}, LenPred: {train_len:.4f}")
+            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, Endpoint: {val_ep:.4f}, LenCons: {val_len_cons:.4f}, LenPred: {val_len:.4f}")
 
-            # 保存最佳模型
-            if val_loss < self.best_val_loss:
+            # Early Stopping 检查
+            improvement = self.best_val_loss - val_loss
+
+            if improvement > self.config.MIN_DELTA:
+                # 有显著改善
                 self.best_val_loss = val_loss
+                self.best_epoch = epoch
+                self.patience_counter = 0
                 self.save_checkpoint(epoch, is_best=True)
-                print(f"✓ 保存最佳模型 (val_loss: {val_loss:.4f})")
+                print(f"✓ 保存最佳模型 (val_loss: {val_loss:.4f}, 改善: {improvement:.6f})")
+            else:
+                # 没有显著改善
+                self.patience_counter += 1
+                print(f"⚠ 验证损失未改善 ({self.patience_counter}/{self.config.EARLY_STOPPING_PATIENCE})")
+
+                # 检查是否触发 Early Stopping
+                if self.patience_counter >= self.config.EARLY_STOPPING_PATIENCE:
+                    print(f"\n{'='*60}")
+                    print(f"Early Stopping 触发！")
+                    print(f"连续 {self.config.EARLY_STOPPING_PATIENCE} 个epoch验证损失未改善")
+                    print(f"最佳模型在 Epoch {self.best_epoch+1}，验证损失: {self.best_val_loss:.4f}")
+                    print(f"{'='*60}\n")
+                    break
 
             # 定期保存检查点
             if (epoch + 1) % 10 == 0:
                 self.save_checkpoint(epoch, is_best=False)
 
-        print("\n训练完成！")
+        # 训练结束总结
+        print("\n" + "="*60)
+        print("训练完成！")
+        print(f"总训练轮数: {epoch+1}")
+        print(f"最佳模型: Epoch {self.best_epoch+1}, 验证损失: {self.best_val_loss:.4f}")
+        print("="*60 + "\n")
+
         self.writer.close()
 
     def save_checkpoint(self, epoch, is_best=False):
@@ -261,6 +329,7 @@ class Trainer:
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'length_predictor_state_dict': self.length_predictor.state_dict(),
+            'predictor_config': self.predictor_config,  # 保存配置
             'optimizer_state_dict': self.optimizer.state_dict(),
             'length_optimizer_state_dict': self.length_optimizer.state_dict(),
             'best_val_loss': self.best_val_loss,
@@ -279,6 +348,7 @@ class Trainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.length_predictor.load_state_dict(checkpoint['length_predictor_state_dict'])
+        self.predictor_config = checkpoint['predictor_config']  # 加载配置
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.length_optimizer.load_state_dict(checkpoint['length_optimizer_state_dict'])
         self.best_val_loss = checkpoint['best_val_loss']
