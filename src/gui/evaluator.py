@@ -461,19 +461,32 @@ class TrajectoryEvaluationGUI:
             metrics_text = [
                 "═══ 轨迹对比指标 ═══",
                 f"AI轨迹数量: {len(ai_trajectories_list)}",
-                f"平均DTW距离: {avg_dtw:.1f}",
-                f"平均Fréchet距离: {avg_frechet:.1f}",
                 "",
-                f"人类轨迹点数: {len(human_coords)}",
+                "轨迹点数:",
+                f"  人类: {len(human_coords)}",
+            ]
+
+            # 添加每条AI轨迹的点数
+            for i, ai_coords in enumerate(ai_trajectories_list):
+                metrics_text.append(f"  AI轨迹{i+1}: {len(ai_coords)}")
+
+            metrics_text.extend([
+                "",
                 f"平均AI点数: {int(np.mean([len(t) for t in ai_trajectories_list]))}",
                 "",
-                f"人类路径长度: {human_total_dist:.1f}",
-                f"平均AI路径长度: {avg_ai_dist:.1f}",
+                "相似度指标:",
+                f"  平均DTW: {avg_dtw:.1f}",
+                f"  平均Fréchet: {avg_frechet:.1f}",
+                "",
+                "路径长度:",
+                f"  人类: {human_total_dist:.1f}",
+                f"  平均AI: {avg_ai_dist:.1f}",
                 "",
                 f"直线距离: {straight_dist:.1f}",
-                f"人类路径效率: {human_efficiency:.2%}",
-                f"平均AI效率: {avg_ai_efficiency:.2%}"
-            ]
+                "路径效率:",
+                f"  人类: {human_efficiency:.2%}",
+                f"  平均AI: {avg_ai_efficiency:.2%}"
+            ])
 
             # 在画布右侧显示
             x_pos = self.canvas.winfo_width() - 260
