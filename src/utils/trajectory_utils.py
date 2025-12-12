@@ -59,8 +59,8 @@ class TrajectoryExtractor:
         从模型生成的输出中提取轨迹点信息
         Args:
             generated_output: (batch, seq_len, input_dim) 或 (seq_len, input_dim)
-                             input_dim=10: [start_x, start_y, end_x, end_y, current_x, current_y,
-                                           velocity, acceleration, direction, distance]
+                             input_dim=11: [start_x, start_y, end_x, end_y, current_x, current_y,
+                                           velocity, acceleration, sin_direction, cos_direction, distance]
         Returns:
             trajectory_points: list of dict, 每个dict包含一个轨迹点的信息
         """
@@ -86,8 +86,12 @@ class TrajectoryExtractor:
             current_x, current_y = point_data[4], point_data[5]
             velocity = point_data[6]
             acceleration = point_data[7]
-            direction = point_data[8]
-            distance = point_data[9]
+            sin_direction = point_data[8]
+            cos_direction = point_data[9]
+            distance = point_data[10]
+
+            # 从sin和cos重构方向角度（弧度转度数）
+            direction = np.arctan2(sin_direction, cos_direction) * 180.0 / np.pi
 
             # 反归一化
             start_x_denorm = self.denormalize_coords(start_x)
@@ -305,7 +309,7 @@ if __name__ == '__main__':
     # 创建模拟数据
     batch_size = 1
     seq_len = 50
-    input_dim = 10
+    input_dim = 11  # 更新为11维
 
     fake_output = torch.randn(batch_size, seq_len, input_dim)
 

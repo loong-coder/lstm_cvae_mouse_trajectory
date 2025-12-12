@@ -12,16 +12,22 @@ class TrajectoryLengthPredictor(nn.Module):
     辅助网络：预测轨迹点的个数
     输入：起点和终点坐标
     输出：预测的轨迹长度
+
+    优化版本：增加网络深度和宽度，添加距离特征
     """
-    def __init__(self, input_dim=4, hidden_dim=64, max_length=500):
+    def __init__(self, input_dim=4, hidden_dim=128, max_length=500):
         super(TrajectoryLengthPredictor, self).__init__()
 
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        # 增加隐藏层深度和宽度
+        self.fc1 = nn.Linear(input_dim + 1, hidden_dim)  # +1 for distance feature
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 1)  # 输出一个长度值
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.fc4 = nn.Linear(hidden_dim // 2, 1)  # 输出一个长度值
 
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(0.3)
+        self.batch_norm1 = nn.BatchNorm1d(hidden_dim)
+        self.batch_norm2 = nn.BatchNorm1d(hidden_dim)
         self.max_length = max_length
 
     def forward(self, start_point, end_point):
@@ -32,14 +38,24 @@ class TrajectoryLengthPredictor(nn.Module):
         Returns:
             predicted_length: (batch,) 预测的轨迹长度
         """
-        # 拼接起点和终点
-        x = torch.cat([start_point, end_point], dim=1)  # (batch, 4)
+        # 计算起点到终点的欧氏距离作为额外特征
+        distance = torch.sqrt(torch.sum((end_point - start_point)**2, dim=1, keepdim=True))
 
-        x = self.relu(self.fc1(x))
+        # 拼接起点、终点和距离
+        x = torch.cat([start_point, end_point, distance], dim=1)  # (batch, 5)
+
+        x = self.fc1(x)
+        x = self.batch_norm1(x)
+        x = self.relu(x)
         x = self.dropout(x)
-        x = self.relu(self.fc2(x))
+
+        x = self.fc2(x)
+        x = self.batch_norm2(x)
+        x = self.relu(x)
         x = self.dropout(x)
-        x = self.fc3(x)  # (batch, 1)
+
+        x = self.relu(self.fc3(x))
+        x = self.fc4(x)  # (batch, 1)
 
         # 使用ReLU确保长度为正，并限制最大长度
         predicted_length = torch.clamp(x.squeeze(-1), min=1, max=self.max_length)
@@ -215,24 +231,42 @@ class LSTMCVAE(nn.Module):
         for t in range(trajectory_length):
             # 构建当前时间步的输入特征
             # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
+
+            # 计算到起点的距离（与训练数据一致）
+            dx_to_start = current_pos[:, 0:1] - start_point[:, 0:1]
+            dy_to_start = current_pos[:, 1:2] - start_point[:, 1:2]
+            distance = torch.sqrt(dx_to_start**2 + dy_to_start**2 + 1e-8)
+
+            # 计算到终点的距离和方向（用于引导生成）
+            dx_to_end = end_point[:, 0:1] - current_pos[:, 0:1]
+            dy_to_end = end_point[:, 1:2] - current_pos[:, 1:2]
+            distance_to_end = torch.sqrt(dx_to_end**2 + dy_to_end**2 + 1e-8)
+
             if t == 0:
-                # 第一步：起点就是当前位置
+                # 第一步：使用从起点到终点的方向作为初始方向
+                direction_rad = torch.atan2(dy_to_end, dx_to_end)
+                sin_direction = torch.sin(direction_rad)
+                cos_direction = torch.cos(direction_rad)
                 velocity = torch.zeros(batch_size, 1).to(device)
                 acceleration = torch.zeros(batch_size, 1).to(device)
-                sin_direction = torch.zeros(batch_size, 1).to(device)
-                cos_direction = torch.zeros(batch_size, 1).to(device)
-                distance = torch.zeros(batch_size, 1).to(device)
             else:
-                # 计算速度、加速度等（简化版本，实际应该基于时间）
+                # 后续步骤：计算相对于上一步的移动方向和速度
                 prev_pos = generated_trajectory[-1][:, 0, 4:6]  # 上一步的current位置
                 dx = current_pos[:, 0:1] - prev_pos[:, 0:1]
                 dy = current_pos[:, 1:2] - prev_pos[:, 1:2]
-                distance = torch.sqrt(dx**2 + dy**2)
+                step_distance = torch.sqrt(dx**2 + dy**2 + 1e-8)
+
+                # 移动方向
                 direction_rad = torch.atan2(dy, dx)
                 sin_direction = torch.sin(direction_rad)
                 cos_direction = torch.cos(direction_rad)
-                velocity = distance * 100  # 简化：假设固定时间间隔
-                acceleration = torch.zeros(batch_size, 1).to(device)  # 简化
+
+                # 速度（简化：假设固定时间间隔）
+                velocity = step_distance * 100
+
+                # 加速度（基于速度变化）
+                prev_velocity = generated_trajectory[-1][:, 0, 6:7]  # 上一步的速度
+                acceleration = (velocity - prev_velocity) * 100
 
             # 构建输入向量
             x_t = torch.cat([
@@ -243,7 +277,7 @@ class LSTMCVAE(nn.Module):
                 acceleration,
                 sin_direction,
                 cos_direction,
-                distance
+                distance  # 到起点的距离，与训练数据一致
             ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
 
             # LSTM前向
@@ -263,9 +297,9 @@ class LSTMCVAE(nn.Module):
         return generated_trajectory
 
 
-def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001):
+def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001, endpoint_weight=1.0, smoothness_weight=0.1):
     """
-    计算CVAE损失：重建损失 + KL散度损失
+    增强的CVAE损失：重建损失 + KL散度损失 + 终点损失 + 平滑度损失
     Args:
         reconstructed: (batch, seq_len, input_dim) 重建的轨迹
         target: (batch, seq_len, input_dim) 目标轨迹
@@ -273,25 +307,65 @@ def compute_loss(reconstructed, target, mu, logvar, mask, kl_weight=0.001):
         logvar: (batch, latent_dim) 潜在变量对数方差
         mask: (batch, seq_len) 有效数据的mask
         kl_weight: KL散度的权重
+        endpoint_weight: 终点损失的权重
+        smoothness_weight: 平滑度损失的权重
     Returns:
         total_loss: 总损失
         recon_loss: 重建损失
         kl_loss: KL散度损失
+        endpoint_loss: 终点损失
+        smoothness_loss: 平滑度损失
     """
-    # 重建损失（MSE）
-    recon_loss = F.mse_loss(reconstructed, target, reduction='none')  # (batch, seq_len, input_dim)
+    # 1. 重建损失（MSE）
+    recon_loss_raw = F.mse_loss(reconstructed, target, reduction='none')  # (batch, seq_len, input_dim)
 
     # 应用mask
-    mask_expanded = mask.unsqueeze(-1).expand_as(recon_loss)  # (batch, seq_len, input_dim)
-    recon_loss = (recon_loss * mask_expanded).sum() / mask.sum()
+    mask_expanded = mask.unsqueeze(-1).expand_as(recon_loss_raw)  # (batch, seq_len, input_dim)
+    recon_loss = (recon_loss_raw * mask_expanded).sum() / (mask.sum() + 1e-8)
 
-    # KL散度损失
+    # 2. KL散度损失
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
 
-    # 总损失
-    total_loss = recon_loss + kl_weight * kl_loss
+    # 3. 终点损失：确保轨迹的最后一个点接近终点
+    # 提取每个序列的最后一个有效点的坐标
+    batch_size = reconstructed.shape[0]
+    endpoint_loss = 0.0
 
-    return total_loss, recon_loss, kl_loss
+    for b in range(batch_size):
+        # 找到最后一个有效点的索引
+        valid_indices = torch.where(mask[b] > 0)[0]
+        if len(valid_indices) > 0:
+            last_idx = valid_indices[-1]
+            # 重建的最后位置 (current_x, current_y at indices 4, 5)
+            reconstructed_endpoint = reconstructed[b, last_idx, 4:6]
+            # 目标终点 (end_x, end_y at indices 2, 3)
+            target_endpoint = target[b, last_idx, 2:4]
+            # 计算终点误差
+            endpoint_loss += F.mse_loss(reconstructed_endpoint, target_endpoint)
+
+    endpoint_loss = endpoint_loss / batch_size
+
+    # 4. 平滑度损失：鼓励相邻点之间的平滑过渡
+    # 计算相邻坐标点之间的加速度变化
+    smoothness_loss = 0.0
+
+    if reconstructed.shape[1] > 2:  # 需要至少3个点来计算加速度
+        # 提取坐标序列 (batch, seq_len, 2)
+        coords = reconstructed[:, :, 4:6]  # current_x, current_y
+
+        # 计算一阶差分（速度）
+        velocity = coords[:, 1:, :] - coords[:, :-1, :]  # (batch, seq_len-1, 2)
+
+        # 计算二阶差分（加速度）
+        acceleration = velocity[:, 1:, :] - velocity[:, :-1, :]  # (batch, seq_len-2, 2)
+
+        # 平滑度损失：加速度的平方和
+        smoothness_loss = torch.mean(acceleration ** 2)
+
+    # 总损失
+    total_loss = recon_loss + kl_weight * kl_loss + endpoint_weight * endpoint_loss + smoothness_weight * smoothness_loss
+
+    return total_loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss
 
 
 if __name__ == '__main__':

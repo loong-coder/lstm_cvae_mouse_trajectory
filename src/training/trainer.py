@@ -67,6 +67,8 @@ class Trainer:
         total_recon_loss = 0
         total_kl_loss = 0
         total_length_loss = 0
+        total_endpoint_loss = 0
+        total_smoothness_loss = 0
 
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config.NUM_EPOCHS} [Train]')
 
@@ -84,10 +86,12 @@ class Trainer:
             # 前向传播
             reconstructed, mu, logvar = self.model(features, start_point, end_point)
 
-            # 计算损失
-            loss, recon_loss, kl_loss = compute_loss(
+            # 计算损失（使用增强损失）
+            loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss = compute_loss(
                 reconstructed, features, mu, logvar, mask,
-                kl_weight=self.config.KL_WEIGHT
+                kl_weight=self.config.KL_WEIGHT,
+                endpoint_weight=1.0,
+                smoothness_weight=0.1
             )
 
             # 反向传播
@@ -113,23 +117,27 @@ class Trainer:
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_kl_loss += kl_loss.item()
+            total_endpoint_loss += endpoint_loss.item()
+            total_smoothness_loss += smoothness_loss.item()
             total_length_loss += length_loss.item()
 
             # 更新进度条
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'recon': f'{recon_loss.item():.4f}',
-                'kl': f'{kl_loss.item():.4f}',
-                'len_loss': f'{length_loss.item():.4f}'
+                'ep': f'{endpoint_loss.item():.4f}',
+                'len': f'{length_loss.item():.4f}'
             })
 
         # 平均损失
         avg_loss = total_loss / len(self.train_loader)
         avg_recon_loss = total_recon_loss / len(self.train_loader)
         avg_kl_loss = total_kl_loss / len(self.train_loader)
+        avg_endpoint_loss = total_endpoint_loss / len(self.train_loader)
+        avg_smoothness_loss = total_smoothness_loss / len(self.train_loader)
         avg_length_loss = total_length_loss / len(self.train_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_length_loss
+        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_loss
 
     def validate(self, epoch):
         """验证"""
@@ -139,6 +147,8 @@ class Trainer:
         total_loss = 0
         total_recon_loss = 0
         total_kl_loss = 0
+        total_endpoint_loss = 0
+        total_smoothness_loss = 0
         total_length_loss = 0
 
         with torch.no_grad():
@@ -151,11 +161,13 @@ class Trainer:
                 lengths = batch['length'].to(self.device)
                 mask = batch['mask'].to(self.device)
 
-                # 主模型
+                # 主模型（使用增强损失）
                 reconstructed, mu, logvar = self.model(features, start_point, end_point)
-                loss, recon_loss, kl_loss = compute_loss(
+                loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss = compute_loss(
                     reconstructed, features, mu, logvar, mask,
-                    kl_weight=self.config.KL_WEIGHT
+                    kl_weight=self.config.KL_WEIGHT,
+                    endpoint_weight=1.0,
+                    smoothness_weight=0.1
                 )
 
                 # 长度预测器
@@ -165,6 +177,8 @@ class Trainer:
                 total_loss += loss.item()
                 total_recon_loss += recon_loss.item()
                 total_kl_loss += kl_loss.item()
+                total_endpoint_loss += endpoint_loss.item()
+                total_smoothness_loss += smoothness_loss.item()
                 total_length_loss += length_loss.item()
 
                 pbar.set_postfix({
@@ -176,9 +190,11 @@ class Trainer:
         avg_loss = total_loss / len(self.val_loader)
         avg_recon_loss = total_recon_loss / len(self.val_loader)
         avg_kl_loss = total_kl_loss / len(self.val_loader)
+        avg_endpoint_loss = total_endpoint_loss / len(self.val_loader)
+        avg_smoothness_loss = total_smoothness_loss / len(self.val_loader)
         avg_length_loss = total_length_loss / len(self.val_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_length_loss
+        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_loss
 
     def train(self):
         """完整训练流程"""
@@ -186,10 +202,10 @@ class Trainer:
 
         for epoch in range(self.config.NUM_EPOCHS):
             # 训练
-            train_loss, train_recon, train_kl, train_len = self.train_epoch(epoch)
+            train_loss, train_recon, train_kl, train_ep, train_smooth, train_len = self.train_epoch(epoch)
 
             # 验证
-            val_loss, val_recon, val_kl, val_len = self.validate(epoch)
+            val_loss, val_recon, val_kl, val_ep, val_smooth, val_len = self.validate(epoch)
 
             # 记录到TensorBoard
             self.writer.add_scalars('Loss/Total', {
@@ -204,6 +220,14 @@ class Trainer:
                 'train': train_kl,
                 'val': val_kl
             }, epoch)
+            self.writer.add_scalars('Loss/Endpoint', {
+                'train': train_ep,
+                'val': val_ep
+            }, epoch)
+            self.writer.add_scalars('Loss/Smoothness', {
+                'train': train_smooth,
+                'val': val_smooth
+            }, epoch)
             self.writer.add_scalars('Loss/Length', {
                 'train': train_len,
                 'val': val_len
@@ -215,8 +239,8 @@ class Trainer:
 
             # 打印统计
             print(f"\nEpoch {epoch+1}/{self.config.NUM_EPOCHS}")
-            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, Length: {train_len:.4f}")
-            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, Length: {val_len:.4f}")
+            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, Endpoint: {train_ep:.4f}, Length: {train_len:.4f}")
+            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, Endpoint: {val_ep:.4f}, Length: {val_len:.4f}")
 
             # 保存最佳模型
             if val_loss < self.best_val_loss:
