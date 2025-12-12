@@ -101,7 +101,7 @@ class Trainer:
             total_kl_loss += kl_loss.item()
             total_endpoint_loss += endpoint_loss.item()
             total_smoothness_loss += smoothness_loss.item()
-            total_length_consistency_loss += length_consistency_loss.item()
+            total_length_consistency_loss += length_consistency_loss  # length_consistency_loss 已经是 float
 
             # 更新进度条
             pbar.set_postfix({
@@ -159,7 +159,7 @@ class Trainer:
                 total_kl_loss += kl_loss.item()
                 total_endpoint_loss += endpoint_loss.item()
                 total_smoothness_loss += smoothness_loss.item()
-                total_length_consistency_loss += length_consistency_loss.item()
+                total_length_consistency_loss += length_consistency_loss  # length_consistency_loss 已经是 float
 
                 pbar.set_postfix({
                     'loss': f'{loss.item():.4f}'
