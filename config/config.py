@@ -11,8 +11,8 @@ class Config:
     DATA_FILE = os.path.join(PROJECT_ROOT, 'mouse_trajectories.csv')
 
     # 特征维度
-    # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, direction, distance
-    INPUT_DIM = 10
+    # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance
+    INPUT_DIM = 11  # 改为11维（direction拆分为sin和cos）
 
     # LSTM参数
     LSTM_HIDDEN_DIM = 128

@@ -144,7 +144,7 @@ class LSTMCVAE(nn.Module):
             latent_dim=config.LATENT_DIM
         )
 
-        # CVAE解码器（输出10维：start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, direction, distance）
+        # CVAE解码器（输出11维：start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance）
         self.decoder = CVAEDecoder(
             latent_dim=config.LATENT_DIM,
             lstm_hidden_dim=config.LSTM_HIDDEN_DIM,
@@ -214,12 +214,13 @@ class LSTMCVAE(nn.Module):
 
         for t in range(trajectory_length):
             # 构建当前时间步的输入特征
-            # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, direction, distance]
+            # [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
             if t == 0:
                 # 第一步：起点就是当前位置
                 velocity = torch.zeros(batch_size, 1).to(device)
                 acceleration = torch.zeros(batch_size, 1).to(device)
-                direction = torch.zeros(batch_size, 1).to(device)
+                sin_direction = torch.zeros(batch_size, 1).to(device)
+                cos_direction = torch.zeros(batch_size, 1).to(device)
                 distance = torch.zeros(batch_size, 1).to(device)
             else:
                 # 计算速度、加速度等（简化版本，实际应该基于时间）
@@ -227,7 +228,9 @@ class LSTMCVAE(nn.Module):
                 dx = current_pos[:, 0:1] - prev_pos[:, 0:1]
                 dy = current_pos[:, 1:2] - prev_pos[:, 1:2]
                 distance = torch.sqrt(dx**2 + dy**2)
-                direction = torch.atan2(dy, dx) * 180 / 3.14159
+                direction_rad = torch.atan2(dy, dx)
+                sin_direction = torch.sin(direction_rad)
+                cos_direction = torch.cos(direction_rad)
                 velocity = distance * 100  # 简化：假设固定时间间隔
                 acceleration = torch.zeros(batch_size, 1).to(device)  # 简化
 
@@ -238,7 +241,8 @@ class LSTMCVAE(nn.Module):
                 current_pos,  # current_x, current_y
                 velocity,
                 acceleration,
-                direction,
+                sin_direction,
+                cos_direction,
                 distance
             ], dim=1).unsqueeze(1)  # (batch, 1, input_dim)
 

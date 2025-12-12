@@ -91,21 +91,27 @@ class MouseTrajectoryDataset(Dataset):
             acceleration = row['acceleration']
             direction = row['direction']
 
-            # 归一化速度、加速度、方向
+            # 归一化速度、加速度
             if self.normalize:
                 velocity = (velocity - self.coord_stats['velocity_mean']) / (self.coord_stats['velocity_std'] + 1e-8)
                 acceleration = (acceleration - self.coord_stats['acceleration_mean']) / (self.coord_stats['acceleration_std'] + 1e-8)
-                direction = (direction - self.coord_stats['direction_mean']) / (self.coord_stats['direction_std'] + 1e-8)
+
+            # 将方向转换为正弦和余弦编码（解决周期性问题）
+            direction_rad = math.radians(direction)
+            sin_dir = math.sin(direction_rad)
+            cos_dir = math.cos(direction_rad)
 
             # 计算相对距离
             distance = math.sqrt((current_x - start_x)**2 + (current_y - start_y)**2)
 
-            # 组合特征向量 [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, direction, distance]
+            # 组合特征向量 [start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance]
             feature_vector = [
                 start_x, start_y,
                 end_x, end_y,
                 current_x, current_y,
-                velocity, acceleration, direction, distance
+                velocity, acceleration,
+                sin_dir, cos_dir,  # 使用sin和cos替代原始角度
+                distance
             ]
 
             features.append(feature_vector)
@@ -126,7 +132,7 @@ class MouseTrajectoryDataset(Dataset):
             end_point = (end_point - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
 
         return {
-            'features': features,  # (seq_len, feature_dim)
+            'features': features,  # (seq_len, feature_dim=11)
             'start_point': start_point,  # (2,)
             'end_point': end_point,  # (2,)
             'length': len(features)  # 轨迹长度

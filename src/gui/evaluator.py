@@ -9,7 +9,7 @@ import time
 
 from config.config import Config
 from src.models.lstm_cvae import LSTMCVAE, TrajectoryLengthPredictor
-from src.utils.trajectory_utils import TrajectoryExtractor
+from src.utils.trajectory_utils import TrajectoryExtractor, TrajectoryComparator
 
 
 class TrajectoryEvaluationGUI:
@@ -44,8 +44,9 @@ class TrajectoryEvaluationGUI:
         self.last_velocity = 0
         self.last_time = None
 
-        # AI轨迹数据
-        self.ai_trajectory = None
+        # AI轨迹数据（支持多条）
+        self.ai_trajectories = []  # 存储多条AI轨迹
+        self.num_trajectories = tk.IntVar(value=3)  # 默认生成3条轨迹
 
         # 创建UI
         self.create_ui()
@@ -86,6 +87,27 @@ class TrajectoryEvaluationGUI:
             bg='lightgray'
         )
         self.status_label.pack(side=tk.LEFT, padx=20, pady=10)
+
+        # 轨迹数量设置
+        settings_frame = tk.Frame(control_frame, bg='lightgray')
+        settings_frame.pack(side=tk.LEFT, padx=20)
+
+        tk.Label(
+            settings_frame,
+            text="AI轨迹数量:",
+            font=('Arial', 10),
+            bg='lightgray'
+        ).pack(side=tk.LEFT, padx=5)
+
+        self.num_spinbox = tk.Spinbox(
+            settings_frame,
+            from_=1,
+            to=10,
+            textvariable=self.num_trajectories,
+            width=5,
+            font=('Arial', 10)
+        )
+        self.num_spinbox.pack(side=tk.LEFT, padx=5)
 
         self.reset_button = tk.Button(
             control_frame,
@@ -259,6 +281,14 @@ class TrajectoryEvaluationGUI:
                 fill='blue', width=2, tags='human_trajectory'
             )
 
+        # 标记停顿点（速度很低的点）
+        if velocity < 50:  # 速度阈值：50像素/秒
+            self.canvas.create_oval(
+                current_pos[0] - 3, current_pos[1] - 3,
+                current_pos[0] + 3, current_pos[1] + 3,
+                fill='darkblue', outline='blue', width=1, tags='pause_point'
+            )
+
         self.last_position = current_pos
         self.last_velocity = velocity
         self.last_time = current_time
@@ -312,20 +342,22 @@ class TrajectoryEvaluationGUI:
             self.on_end_point_click(event)
 
     def generate_ai_trajectory(self):
-        """使用模型生成AI轨迹"""
+        """使用模型生成多条AI轨迹"""
         try:
-            print(f"\n开始生成AI轨迹...")
+            num_traj = self.num_trajectories.get()
+            print(f"\n开始生成{num_traj}条AI轨迹...")
             print(f"起点: {self.start_point}, 终点: {self.end_point}")
+
+            # 清空之前的轨迹
+            self.ai_trajectories = []
 
             # 归一化起点和终点
             start_np = np.array([self.start_point], dtype=np.float32)
             end_np = np.array([self.end_point], dtype=np.float32)
 
             if self.norm_stats:
-                print(f"归一化前: start={start_np}, end={end_np}")
                 start_np = (start_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
                 end_np = (end_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
-                print(f"归一化后: start={start_np}, end={end_np}")
 
             start_tensor = torch.FloatTensor(start_np).to(self.device)
             end_tensor = torch.FloatTensor(end_np).to(self.device)
@@ -338,21 +370,25 @@ class TrajectoryEvaluationGUI:
 
             print(f"预测轨迹长度: {trajectory_length}")
 
-            # 生成轨迹
-            with torch.no_grad():
-                ai_output = self.model.generate(start_tensor, end_tensor, trajectory_length)
-                print(f"生成轨迹形状: {ai_output.shape}")
+            # 生成多条轨迹
+            for i in range(num_traj):
+                print(f"  生成第 {i+1}/{num_traj} 条轨迹...")
+                with torch.no_grad():
+                    ai_output = self.model.generate(start_tensor, end_tensor, trajectory_length)
 
-            # 提取轨迹点
-            ai_coords = self.extractor.extract_coordinates_only(ai_output)
-            print(f"提取坐标数量: {len(ai_coords)}")
-            print(f"坐标范围: x=[{ai_coords[:,0].min():.1f}, {ai_coords[:,0].max():.1f}], y=[{ai_coords[:,1].min():.1f}, {ai_coords[:,1].max():.1f}]")
+                # 提取轨迹点
+                ai_coords = self.extractor.extract_coordinates_only(ai_output)
+                self.ai_trajectories.append(ai_coords)
+                print(f"    提取坐标数量: {len(ai_coords)}")
 
-            # 绘制AI轨迹
-            self.draw_ai_trajectory(ai_coords)
+            # 绘制所有AI轨迹
+            self.draw_ai_trajectories(self.ai_trajectories)
 
-            self.status_label.config(text="完成！蓝色=人类轨迹，红色=AI轨迹")
-            print("AI轨迹生成完成！")
+            # 计算并显示对比指标
+            self.compute_and_display_metrics(self.ai_trajectories)
+
+            self.status_label.config(text=f"完成！蓝色=人类轨迹，其他颜色=AI轨迹(共{num_traj}条)")
+            print(f"所有AI轨迹生成完成！")
 
         except Exception as e:
             print(f"生成AI轨迹时出错: {str(e)}")
@@ -360,19 +396,150 @@ class TrajectoryEvaluationGUI:
             traceback.print_exc()
             self.status_label.config(text=f"错误: {str(e)}")
 
-    def draw_ai_trajectory(self, coords):
-        """绘制AI生成的轨迹"""
-        for i in range(len(coords) - 1):
-            self.canvas.create_line(
-                coords[i][0], coords[i][1],
-                coords[i+1][0], coords[i+1][1],
-                fill='red', width=2, tags='ai_trajectory'
+    def compute_and_display_metrics(self, ai_trajectories_list):
+        """计算并显示人类轨迹和多条AI轨迹的对比指标"""
+        try:
+            print(f"\n计算对比指标...")
+
+            # 提取人类轨迹的坐标
+            human_coords = np.array([[p['current_x'], p['current_y']] for p in self.human_trajectory])
+
+            print(f"人类轨迹点数: {len(human_coords)}")
+
+            #计算多条AI轨迹的平均指标
+            dtw_distances = []
+            frechet_distances = []
+            ai_total_dists = []
+
+            for i, ai_coords in enumerate(ai_trajectories_list):
+                print(f"AI轨迹{i+1}点数: {len(ai_coords)}")
+
+                # 计算DTW距离
+                dtw_dist = TrajectoryComparator.compute_dtw_distance(human_coords, ai_coords)
+                dtw_distances.append(dtw_dist)
+
+                # 计算Fréchet距离
+                frechet_dist = TrajectoryComparator.compute_frechet_distance(human_coords, ai_coords)
+                frechet_distances.append(frechet_dist)
+
+                # 计算轨迹长度
+                ai_total_dist = np.sum(np.sqrt(np.sum(np.diff(ai_coords, axis=0)**2, axis=1)))
+                ai_total_dists.append(ai_total_dist)
+
+            # 计算平均值
+            avg_dtw = np.mean(dtw_distances)
+            avg_frechet = np.mean(frechet_distances)
+            avg_ai_dist = np.mean(ai_total_dists)
+
+            print(f"平均DTW距离: {avg_dtw:.2f}")
+            print(f"平均Fréchet距离: {avg_frechet:.2f}")
+
+            # 计算人类轨迹长度
+            human_total_dist = sum([p['distance'] for p in self.human_trajectory])
+
+            # 计算直线距离
+            straight_dist = math.sqrt(
+                (self.end_point[0] - self.start_point[0])**2 +
+                (self.end_point[1] - self.start_point[1])**2
             )
+
+            # 计算路径效率
+            human_efficiency = straight_dist / human_total_dist if human_total_dist > 0 else 0
+            avg_ai_efficiency = straight_dist / avg_ai_dist if avg_ai_dist > 0 else 0
+
+            # 在画布右下角显示指标
+            metrics_text = [
+                "═══ 轨迹对比指标 ═══",
+                f"AI轨迹数量: {len(ai_trajectories_list)}",
+                f"平均DTW距离: {avg_dtw:.1f}",
+                f"平均Fréchet距离: {avg_frechet:.1f}",
+                "",
+                f"人类轨迹点数: {len(human_coords)}",
+                f"平均AI点数: {int(np.mean([len(t) for t in ai_trajectories_list]))}",
+                "",
+                f"人类路径长度: {human_total_dist:.1f}",
+                f"平均AI路径长度: {avg_ai_dist:.1f}",
+                "",
+                f"直线距离: {straight_dist:.1f}",
+                f"人类路径效率: {human_efficiency:.2%}",
+                f"平均AI效率: {avg_ai_efficiency:.2%}"
+            ]
+
+            # 在画布右侧显示
+            x_pos = self.canvas.winfo_width() - 260
+            y_start = 100
+
+            # 绘制白色背景
+            self.canvas.create_rectangle(
+                x_pos - 10, y_start - 10,
+                x_pos + 240, y_start + len(metrics_text) * 18 + 10,
+                fill='white', outline='black', width=2, tags='metrics'
+            )
+
+            # 绘制每行文本
+            for i, line in enumerate(metrics_text):
+                if line == "":
+                    continue
+                color = 'darkblue' if '═' in line else 'black'
+                font = ('Arial', 10, 'bold') if '═' in line else ('Arial', 9)
+
+                self.canvas.create_text(
+                    x_pos, y_start + i * 18,
+                    text=line,
+                    anchor='w',
+                    font=font,
+                    fill=color,
+                    tags='metrics'
+                )
+
+            print("指标显示完成！")
+
+        except Exception as e:
+            print(f"计算指标时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def draw_ai_trajectories(self, trajectories_list):
+        """绘制多条AI生成的轨迹，使用不同颜色，并标记停顿点"""
+        # 定义颜色列表
+        colors = ['red', 'orange', 'purple', 'brown', 'pink',
+                  'cyan', 'magenta', 'olive', 'navy', 'maroon']
+
+        # 深色系列（用于停顿点）
+        dark_colors = ['darkred', 'darkorange', 'purple', 'saddlebrown', 'hotpink',
+                       'darkcyan', 'darkmagenta', 'darkolivegreen', 'darkblue', 'maroon']
+
+        for traj_idx, coords in enumerate(trajectories_list):
+            color = colors[traj_idx % len(colors)]
+            dark_color = dark_colors[traj_idx % len(dark_colors)]
+
+            # 绘制轨迹线
+            for i in range(len(coords) - 1):
+                self.canvas.create_line(
+                    coords[i][0], coords[i][1],
+                    coords[i+1][0], coords[i+1][1],
+                    fill=color, width=2, tags='ai_trajectory'
+                )
+
+            # 标记停顿点（相邻点之间距离很小的点）
+            for i in range(1, len(coords)):
+                # 计算与前一个点的距离
+                dist = np.sqrt((coords[i][0] - coords[i-1][0])**2 +
+                              (coords[i][1] - coords[i-1][1])**2)
+
+                # 如果距离小于阈值，标记为停顿点
+                if dist < 5:  # 距离阈值：5像素
+                    self.canvas.create_oval(
+                        coords[i][0] - 3, coords[i][1] - 3,
+                        coords[i][0] + 3, coords[i][1] + 3,
+                        fill=dark_color, outline=color, width=1, tags='ai_pause_point'
+                    )
 
         # 添加图例
         legend_x = 20
         legend_y = 20
 
+        # 人类轨迹图例
         self.canvas.create_line(
             legend_x, legend_y, legend_x + 30, legend_y,
             fill='blue', width=3
@@ -382,20 +549,43 @@ class TrajectoryEvaluationGUI:
             text='人类轨迹', anchor='w', font=('Arial', 10)
         )
 
-        self.canvas.create_line(
-            legend_x, legend_y + 25, legend_x + 30, legend_y + 25,
-            fill='red', width=3
+        # AI轨迹图例（显示前几条）
+        for i in range(min(len(trajectories_list), 5)):  # 最多显示5条图例
+            color = colors[i % len(colors)]
+            y_pos = legend_y + (i + 1) * 20
+            self.canvas.create_line(
+                legend_x, y_pos, legend_x + 30, y_pos,
+                fill=color, width=3
+            )
+            self.canvas.create_text(
+                legend_x + 40, y_pos,
+                text=f'AI轨迹{i+1}', anchor='w', font=('Arial', 9)
+            )
+
+        # 如果轨迹太多，显示省略号
+        if len(trajectories_list) > 5:
+            self.canvas.create_text(
+                legend_x + 40, legend_y + 6 * 20,
+                text='...', anchor='w', font=('Arial', 9)
+            )
+
+        # 添加停顿点图例说明
+        pause_y = legend_y + min(len(trajectories_list) + 1, 6) * 20 + 10
+        self.canvas.create_oval(
+            legend_x + 10, pause_y - 3,
+            legend_x + 10 + 6, pause_y + 3,
+            fill='darkblue', outline='blue', width=1
         )
         self.canvas.create_text(
-            legend_x + 40, legend_y + 25,
-            text='AI轨迹', anchor='w', font=('Arial', 10)
+            legend_x + 40, pause_y,
+            text='停顿点', anchor='w', font=('Arial', 9), fill='gray'
         )
 
     def reset(self):
         """重置"""
         self.state = 'waiting_start'
         self.human_trajectory = []
-        self.ai_trajectory = None
+        self.ai_trajectories = []
         self.show_start_point()
 
 
