@@ -1,10 +1,14 @@
 """
 配置文件 - 所有超参数和路径配置
 """
+import os
 
 class Config:
+    # 项目根目录（相对于此配置文件）
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
     # 数据相关
-    DATA_FILE = 'mouse_trajectories.csv'
+    DATA_FILE = os.path.join(PROJECT_ROOT, 'mouse_trajectories.csv')
 
     # 特征维度
     # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, direction, distance
@@ -34,9 +38,8 @@ class Config:
     KL_WEIGHT = 0.001
 
     # 模型保存路径
-    MODEL_SAVE_PATH = 'models/'
-    BEST_MODEL_PATH = 'models/best_model.pth'
-    LENGTH_PREDICTOR_PATH = 'models/length_predictor.pth'
+    MODEL_SAVE_PATH = os.path.join(PROJECT_ROOT, 'models/')
+    BEST_MODEL_PATH = os.path.join(PROJECT_ROOT, 'models/best_model.pth')
 
     # 设备
     DEVICE = 'cuda'  # 'cuda' or 'cpu'

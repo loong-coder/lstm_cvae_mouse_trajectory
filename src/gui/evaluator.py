@@ -55,7 +55,7 @@ class TrajectoryEvaluationGUI:
 
     def load_model(self, model_path):
         """加载训练好的模型"""
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
 
         self.model = LSTMCVAE(self.config).to(self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -181,11 +181,15 @@ class TrajectoryEvaluationGUI:
 
         self.canvas.create_text(
             end_x, end_y + self.point_radius + 20,
-            text='终点',
+            text='终点（点击结束）',
             fill='black', font=('Arial', 12), tags='hint'
         )
 
+        # 绑定点击事件到红色点
         self.canvas.tag_bind('end_point', '<Button-1>', self.on_end_point_click)
+
+        # 同时绑定全局点击事件作为备选
+        self.canvas.bind('<Button-1>', self.on_canvas_click)
 
         # 开始记录人类轨迹
         self.state = 'recording_human'
@@ -196,7 +200,10 @@ class TrajectoryEvaluationGUI:
         self.last_time = self.recording_start_time
 
         self.canvas.bind('<Motion>', self.on_mouse_move)
-        self.status_label.config(text="移动鼠标到红色点...")
+        self.status_label.config(text="移动鼠标到红色点，然后点击红色点结束...")
+
+        print(f"\n已显示终点: {self.end_point}")
+        print(f"状态设置为: {self.state}")
 
     def on_mouse_move(self, event):
         """记录鼠标移动"""
@@ -258,55 +265,100 @@ class TrajectoryEvaluationGUI:
 
     def on_end_point_click(self, event):
         """点击红色终点"""
+        print(f"\n检测到终点点击事件!")
+        print(f"  当前状态: {self.state}")
+        print(f"  点击位置: ({event.x}, {event.y})")
+        print(f"  终点位置: {self.end_point}")
+
         if self.state != 'recording_human':
+            print(f"  状态不对，需要 'recording_human'，当前是 '{self.state}'")
             return
 
         x, y = self.end_point
         distance = math.sqrt((event.x - x)**2 + (event.y - y)**2)
-        if distance > self.point_radius:
+        print(f"  点击距离圆心: {distance:.1f} 像素 (半径: {self.point_radius})")
+
+        # 放宽点击判断：允许点击圆圈附近（增加到1.5倍半径）
+        if distance > self.point_radius * 1.5:
+            print(f"  距离太远，忽略点击")
             return
+
+        print(f"  ✓ 点击有效！停止记录并生成AI轨迹...")
 
         # 停止记录
         self.state = 'waiting_ai'
         self.canvas.unbind('<Motion>')
+        self.canvas.unbind('<Button-1>')  # 解绑全局点击
 
         self.status_label.config(text="人类轨迹记录完成，生成AI轨迹中...")
 
         # 生成AI轨迹
         self.root.after(500, self.generate_ai_trajectory)
 
+    def on_canvas_click(self, event):
+        """全局点击事件处理（用于检测点击终点）"""
+        if self.state != 'recording_human':
+            return
+
+        # 检查是否点击在红色终点附近
+        if self.end_point is None:
+            return
+
+        x, y = self.end_point
+        distance = math.sqrt((event.x - x)**2 + (event.y - y)**2)
+
+        # 如果点击在终点附近，调用终点点击处理
+        if distance <= self.point_radius * 1.5:
+            self.on_end_point_click(event)
+
     def generate_ai_trajectory(self):
         """使用模型生成AI轨迹"""
-        # 归一化起点和终点
-        start_np = np.array([self.start_point], dtype=np.float32)
-        end_np = np.array([self.end_point], dtype=np.float32)
+        try:
+            print(f"\n开始生成AI轨迹...")
+            print(f"起点: {self.start_point}, 终点: {self.end_point}")
 
-        if self.norm_stats:
-            start_np = (start_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
-            end_np = (end_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
+            # 归一化起点和终点
+            start_np = np.array([self.start_point], dtype=np.float32)
+            end_np = np.array([self.end_point], dtype=np.float32)
 
-        start_tensor = torch.FloatTensor(start_np).to(self.device)
-        end_tensor = torch.FloatTensor(end_np).to(self.device)
+            if self.norm_stats:
+                print(f"归一化前: start={start_np}, end={end_np}")
+                start_np = (start_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
+                end_np = (end_np - self.norm_stats['coord_mean']) / self.norm_stats['coord_std']
+                print(f"归一化后: start={start_np}, end={end_np}")
 
-        # 预测轨迹长度
-        with torch.no_grad():
-            predicted_length = self.length_predictor(start_tensor, end_tensor)
-            trajectory_length = int(predicted_length.item())
-            trajectory_length = max(10, min(trajectory_length, self.config.MAX_TRAJECTORY_LENGTH))
+            start_tensor = torch.FloatTensor(start_np).to(self.device)
+            end_tensor = torch.FloatTensor(end_np).to(self.device)
 
-        print(f"预测轨迹长度: {trajectory_length}")
+            # 预测轨迹长度
+            with torch.no_grad():
+                predicted_length = self.length_predictor(start_tensor, end_tensor)
+                trajectory_length = int(predicted_length.item())
+                trajectory_length = max(10, min(trajectory_length, self.config.MAX_TRAJECTORY_LENGTH))
 
-        # 生成轨迹
-        with torch.no_grad():
-            ai_output = self.model.generate(start_tensor, end_tensor, trajectory_length)
+            print(f"预测轨迹长度: {trajectory_length}")
 
-        # 提取轨迹点
-        ai_coords = self.extractor.extract_coordinates_only(ai_output)
+            # 生成轨迹
+            with torch.no_grad():
+                ai_output = self.model.generate(start_tensor, end_tensor, trajectory_length)
+                print(f"生成轨迹形状: {ai_output.shape}")
 
-        # 绘制AI轨迹
-        self.draw_ai_trajectory(ai_coords)
+            # 提取轨迹点
+            ai_coords = self.extractor.extract_coordinates_only(ai_output)
+            print(f"提取坐标数量: {len(ai_coords)}")
+            print(f"坐标范围: x=[{ai_coords[:,0].min():.1f}, {ai_coords[:,0].max():.1f}], y=[{ai_coords[:,1].min():.1f}, {ai_coords[:,1].max():.1f}]")
 
-        self.status_label.config(text="完成！蓝色=人类轨迹，红色=AI轨迹")
+            # 绘制AI轨迹
+            self.draw_ai_trajectory(ai_coords)
+
+            self.status_label.config(text="完成！蓝色=人类轨迹，红色=AI轨迹")
+            print("AI轨迹生成完成！")
+
+        except Exception as e:
+            print(f"生成AI轨迹时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.status_label.config(text=f"错误: {str(e)}")
 
     def draw_ai_trajectory(self, coords):
         """绘制AI生成的轨迹"""

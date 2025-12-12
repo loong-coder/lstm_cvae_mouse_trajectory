@@ -223,7 +223,7 @@ class LSTMCVAE(nn.Module):
                 distance = torch.zeros(batch_size, 1).to(device)
             else:
                 # 计算速度、加速度等（简化版本，实际应该基于时间）
-                prev_pos = generated_trajectory[-1][:, 4:6]  # 上一步的current位置
+                prev_pos = generated_trajectory[-1][:, 0, 4:6]  # 上一步的current位置
                 dx = current_pos[:, 0:1] - prev_pos[:, 0:1]
                 dy = current_pos[:, 1:2] - prev_pos[:, 1:2]
                 distance = torch.sqrt(dx**2 + dy**2)

@@ -46,10 +46,10 @@ class Trainer:
 
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=5
         )
         self.length_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.length_optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            self.length_optimizer, mode='min', factor=0.5, patience=5
         )
 
         # TensorBoard
@@ -252,7 +252,7 @@ class Trainer:
 
     def load_checkpoint(self, path):
         """加载模型检查点"""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.length_predictor.load_state_dict(checkpoint['length_predictor_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
