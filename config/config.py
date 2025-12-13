@@ -41,13 +41,13 @@ class Config:
     # 损失函数权重
     KL_WEIGHT = 0.001  # KL散度权重（CVAE损失）- 降低以允许模型学习更真实的轨迹
     ENDPOINT_WEIGHT = 2.0  # 终点损失权重 - 增加以确保到达终点
-    SMOOTHNESS_WEIGHT = 0.1  # 平滑度损失权重
-    DISTRIBUTION_WEIGHT = 8.0  # 分布损失权重（轨迹点分布一致性）- 调高确保点分布与真实轨迹一致
+    SMOOTHNESS_WEIGHT = 0.5  # 平滑度损失权重
+    DISTRIBUTION_WEIGHT = 1.0  # 分布损失权重（轨迹点分布一致性）- 降低避免过度约束
 
     # 几何约束损失权重（确保轨迹符合物理规律）
     DIRECTION_WEIGHT = 3.0  # 方向一致性损失（确保朝向终点）- 增加到3.0
-    STEP_UNIFORMITY_WEIGHT = 3.0  # 步长均匀性损失（防止点聚集/分散）- 调高到3.0
-    BOUNDARY_WEIGHT = 5.0  # 边界约束损失（防止偏离直线）- 调高到5.0，让轨迹贴近直线
+    STEP_UNIFORMITY_WEIGHT = 2.0  # 步长均匀性损失（防止点聚集）- 增加到2.0
+    BOUNDARY_WEIGHT = 3.0  # 边界约束损失（防止偏离直线）- 增加到2.0
 
     # 模型保存路径
     MODEL_SAVE_PATH = os.path.join(PROJECT_ROOT, 'models/')
