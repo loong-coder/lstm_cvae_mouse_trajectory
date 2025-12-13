@@ -42,12 +42,15 @@ class MouseTrajectoryDataset(Dataset):
         print(f"加载了 {len(self.trajectories)} 条轨迹")
 
     def _compute_normalization_stats(self):
-        """计算归一化统计信息"""
-        coords_data = self.data[['start_x', 'start_y', 'end_x', 'end_y', 'current_x', 'current_y']]
+        """计算归一化统计信息（改用简单的屏幕尺寸归一化）"""
+        # 获取屏幕尺寸（从配置或数据推断）
+        from config.config import Config
+        config = Config()
 
+        # 速度和加速度仍使用Z-score归一化
         stats = {
-            'coord_mean': coords_data.mean().mean(),
-            'coord_std': coords_data.std().mean(),
+            'screen_width': config.SCREEN_WIDTH,
+            'screen_height': config.SCREEN_HEIGHT,
             'velocity_mean': self.data['velocity'].mean(),
             'velocity_std': self.data['velocity'].std(),
             'acceleration_mean': self.data['acceleration'].mean(),
@@ -78,14 +81,14 @@ class MouseTrajectoryDataset(Dataset):
             current_x = row['current_x']
             current_y = row['current_y']
 
-            # 归一化坐标
+            # 归一化坐标（改用简单的[0,1]归一化）
             if self.normalize:
-                start_x = (start_x - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-                start_y = (start_y - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-                end_x = (end_x - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-                end_y = (end_y - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-                current_x = (current_x - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-                current_y = (current_y - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
+                start_x = start_x / self.coord_stats['screen_width']
+                start_y = start_y / self.coord_stats['screen_height']
+                end_x = end_x / self.coord_stats['screen_width']
+                end_y = end_y / self.coord_stats['screen_height']
+                current_x = current_x / self.coord_stats['screen_width']
+                current_y = current_y / self.coord_stats['screen_height']
 
             # 速度、加速度、方向
             velocity = row['velocity']
@@ -131,10 +134,12 @@ class MouseTrajectoryDataset(Dataset):
         start_point = np.array([first_row['start_x'], first_row['start_y']], dtype=np.float32)
         end_point = np.array([first_row['end_x'], first_row['end_y']], dtype=np.float32)
 
-        # 归一化起点终点
+        # 归一化起点终点（改用简单的[0,1]归一化）
         if self.normalize:
-            start_point = (start_point - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
-            end_point = (end_point - self.coord_stats['coord_mean']) / self.coord_stats['coord_std']
+            start_point[0] = start_point[0] / self.coord_stats['screen_width']
+            start_point[1] = start_point[1] / self.coord_stats['screen_height']
+            end_point[0] = end_point[0] / self.coord_stats['screen_width']
+            end_point[1] = end_point[1] / self.coord_stats['screen_height']
 
         return {
             'features': features,  # (seq_len, feature_dim=12)

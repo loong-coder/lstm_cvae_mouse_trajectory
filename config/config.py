@@ -31,21 +31,23 @@ class Config:
     # 训练参数
     BATCH_SIZE = 32
     LEARNING_RATE = 0.001
-    NUM_EPOCHS = 200  # 最大训练轮数
+    NUM_EPOCHS = 300  # 最大训练轮数
     TRAIN_SPLIT = 0.8  # 训练集比例
 
     # Early Stopping 参数
-    EARLY_STOPPING_PATIENCE = 20  # 连续20次不改善则停止训练
+    EARLY_STOPPING_PATIENCE = 15  # 连续15次不改善则停止训练
     MIN_DELTA = 1e-4  # 最小改善阈值
 
-    # KL散度权重（CVAE损失）
-    KL_WEIGHT = 0.001
-
     # 损失函数权重
-    ENDPOINT_WEIGHT = 1.0  # 终点损失权重
+    KL_WEIGHT = 0.001  # KL散度权重（CVAE损失）- 降低以允许模型学习更真实的轨迹
+    ENDPOINT_WEIGHT = 2.0  # 终点损失权重 - 增加以确保到达终点
     SMOOTHNESS_WEIGHT = 0.1  # 平滑度损失权重
-    LENGTH_CONSISTENCY_WEIGHT = 5.0  # 长度一致性损失权重（主模型训练时，使模型生成的轨迹点数接近预测的点数）
-    LENGTH_PREDICTOR_WEIGHT = 2.0  # 长度预测器损失权重（训练长度预测器时使用的权重）
+    DISTRIBUTION_WEIGHT = 8.0  # 分布损失权重（轨迹点分布一致性）- 调高确保点分布与真实轨迹一致
+
+    # 几何约束损失权重（确保轨迹符合物理规律）
+    DIRECTION_WEIGHT = 3.0  # 方向一致性损失（确保朝向终点）- 增加到3.0
+    STEP_UNIFORMITY_WEIGHT = 3.0  # 步长均匀性损失（防止点聚集/分散）- 调高到3.0
+    BOUNDARY_WEIGHT = 5.0  # 边界约束损失（防止偏离直线）- 调高到5.0，让轨迹贴近直线
 
     # 模型保存路径
     MODEL_SAVE_PATH = os.path.join(PROJECT_ROOT, 'models/')

@@ -62,7 +62,10 @@ class Trainer:
         total_kl_loss = 0
         total_endpoint_loss = 0
         total_smoothness_loss = 0
-        total_length_consistency_loss = 0
+        total_distribution_loss = 0
+        total_direction_loss = 0
+        total_step_uniformity_loss = 0
+        total_boundary_loss = 0
 
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config.NUM_EPOCHS} [Train]')
 
@@ -77,17 +80,26 @@ class Trainer:
             # 训练（模型现在包含所有部分，统一训练）
             self.optimizer.zero_grad()
 
-            # 前向传播
-            reconstructed, mu, logvar = self.model(features, start_point, end_point)
+            # 前向传播（模型现在返回5个值：后验均值/方差，先验均值/方差）
+            reconstructed, mu_posterior, logvar_posterior, mu_prior, logvar_prior = self.model(
+                features, start_point, end_point
+            )
 
-            # 计算损失（不再需要预测长度，模型通过 remaining_points 特征学习）
-            loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, length_consistency_loss = compute_loss(
-                reconstructed, features, mu, logvar, mask,
+            # 计算损失（添加几何约束损失）
+            # 训练时传入后验和先验分布参数
+            (loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, distribution_loss,
+             direction_loss, step_uniformity_loss, boundary_loss) = compute_loss(
+                reconstructed, features,
+                mu_posterior, logvar_posterior, mu_prior, logvar_prior,  # 传入后验和先验
+                mask,
                 kl_weight=self.config.KL_WEIGHT,
                 endpoint_weight=self.config.ENDPOINT_WEIGHT,
                 smoothness_weight=self.config.SMOOTHNESS_WEIGHT,
-                predicted_length=None,  # 不再使用单独的长度预测器
-                length_weight=0.0  # 不使用长度一致性损失
+                distribution_weight=self.config.DISTRIBUTION_WEIGHT,
+                direction_weight=self.config.DIRECTION_WEIGHT,
+                step_uniformity_weight=self.config.STEP_UNIFORMITY_WEIGHT,
+                boundary_weight=self.config.BOUNDARY_WEIGHT,
+                num_bins=10
             )
 
             # 反向传播
@@ -101,13 +113,17 @@ class Trainer:
             total_kl_loss += kl_loss.item()
             total_endpoint_loss += endpoint_loss.item()
             total_smoothness_loss += smoothness_loss.item()
-            total_length_consistency_loss += length_consistency_loss  # length_consistency_loss 已经是 float
+            total_distribution_loss += distribution_loss.item()
+            total_direction_loss += direction_loss.item()
+            total_step_uniformity_loss += step_uniformity_loss.item()
+            total_boundary_loss += boundary_loss.item()
 
             # 更新进度条
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'recon': f'{recon_loss.item():.4f}',
-                'ep': f'{endpoint_loss.item():.4f}'
+                'ep': f'{endpoint_loss.item():.4f}',
+                'dir': f'{direction_loss.item():.4f}'
             })
 
         # 平均损失
@@ -116,9 +132,13 @@ class Trainer:
         avg_kl_loss = total_kl_loss / len(self.train_loader)
         avg_endpoint_loss = total_endpoint_loss / len(self.train_loader)
         avg_smoothness_loss = total_smoothness_loss / len(self.train_loader)
-        avg_length_consistency_loss = total_length_consistency_loss / len(self.train_loader)
+        avg_distribution_loss = total_distribution_loss / len(self.train_loader)
+        avg_direction_loss = total_direction_loss / len(self.train_loader)
+        avg_step_uniformity_loss = total_step_uniformity_loss / len(self.train_loader)
+        avg_boundary_loss = total_boundary_loss / len(self.train_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_consistency_loss
+        return (avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss,
+                avg_distribution_loss, avg_direction_loss, avg_step_uniformity_loss, avg_boundary_loss)
 
     def validate(self, epoch):
         """验证"""
@@ -129,7 +149,10 @@ class Trainer:
         total_kl_loss = 0
         total_endpoint_loss = 0
         total_smoothness_loss = 0
-        total_length_consistency_loss = 0
+        total_distribution_loss = 0
+        total_direction_loss = 0
+        total_step_uniformity_loss = 0
+        total_boundary_loss = 0
 
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc=f'Epoch {epoch+1}/{self.config.NUM_EPOCHS} [Val]')
@@ -141,17 +164,25 @@ class Trainer:
                 lengths = batch['length'].to(self.device)
                 mask = batch['mask'].to(self.device)
 
-                # 前向传播
-                reconstructed, mu, logvar = self.model(features, start_point, end_point)
+                # 前向传播（模型现在返回5个值）
+                reconstructed, mu_posterior, logvar_posterior, mu_prior, logvar_prior = self.model(
+                    features, start_point, end_point
+                )
 
-                # 计算损失
-                loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, length_consistency_loss = compute_loss(
-                    reconstructed, features, mu, logvar, mask,
+                # 计算损失（添加几何约束损失）
+                (loss, recon_loss, kl_loss, endpoint_loss, smoothness_loss, distribution_loss,
+                 direction_loss, step_uniformity_loss, boundary_loss) = compute_loss(
+                    reconstructed, features,
+                    mu_posterior, logvar_posterior, mu_prior, logvar_prior,  # 传入后验和先验
+                    mask,
                     kl_weight=self.config.KL_WEIGHT,
                     endpoint_weight=self.config.ENDPOINT_WEIGHT,
                     smoothness_weight=self.config.SMOOTHNESS_WEIGHT,
-                    predicted_length=None,
-                    length_weight=0.0
+                    distribution_weight=self.config.DISTRIBUTION_WEIGHT,
+                    direction_weight=self.config.DIRECTION_WEIGHT,
+                    step_uniformity_weight=self.config.STEP_UNIFORMITY_WEIGHT,
+                    boundary_weight=self.config.BOUNDARY_WEIGHT,
+                    num_bins=10
                 )
 
                 total_loss += loss.item()
@@ -159,7 +190,10 @@ class Trainer:
                 total_kl_loss += kl_loss.item()
                 total_endpoint_loss += endpoint_loss.item()
                 total_smoothness_loss += smoothness_loss.item()
-                total_length_consistency_loss += length_consistency_loss  # length_consistency_loss 已经是 float
+                total_distribution_loss += distribution_loss.item()
+                total_direction_loss += direction_loss.item()
+                total_step_uniformity_loss += step_uniformity_loss.item()
+                total_boundary_loss += boundary_loss.item()
 
                 pbar.set_postfix({
                     'loss': f'{loss.item():.4f}'
@@ -171,9 +205,13 @@ class Trainer:
         avg_kl_loss = total_kl_loss / len(self.val_loader)
         avg_endpoint_loss = total_endpoint_loss / len(self.val_loader)
         avg_smoothness_loss = total_smoothness_loss / len(self.val_loader)
-        avg_length_consistency_loss = total_length_consistency_loss / len(self.val_loader)
+        avg_distribution_loss = total_distribution_loss / len(self.val_loader)
+        avg_direction_loss = total_direction_loss / len(self.val_loader)
+        avg_step_uniformity_loss = total_step_uniformity_loss / len(self.val_loader)
+        avg_boundary_loss = total_boundary_loss / len(self.val_loader)
 
-        return avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss, avg_length_consistency_loss
+        return (avg_loss, avg_recon_loss, avg_kl_loss, avg_endpoint_loss, avg_smoothness_loss,
+                avg_distribution_loss, avg_direction_loss, avg_step_uniformity_loss, avg_boundary_loss)
 
     def train(self):
         """完整训练流程（带 Early Stopping）"""
@@ -182,10 +220,12 @@ class Trainer:
 
         for epoch in range(self.config.NUM_EPOCHS):
             # 训练
-            train_loss, train_recon, train_kl, train_ep, train_smooth, train_len_cons = self.train_epoch(epoch)
+            (train_loss, train_recon, train_kl, train_ep, train_smooth, train_dist,
+             train_dir, train_step_uni, train_boundary) = self.train_epoch(epoch)
 
             # 验证
-            val_loss, val_recon, val_kl, val_ep, val_smooth, val_len_cons = self.validate(epoch)
+            (val_loss, val_recon, val_kl, val_ep, val_smooth, val_dist,
+             val_dir, val_step_uni, val_boundary) = self.validate(epoch)
 
             # 记录到TensorBoard
             self.writer.add_scalars('Loss/Total', {
@@ -208,24 +248,42 @@ class Trainer:
                 'train': train_smooth,
                 'val': val_smooth
             }, epoch)
+            self.writer.add_scalars('Loss/Distribution', {
+                'train': train_dist,
+                'val': val_dist
+            }, epoch)
+            self.writer.add_scalars('Loss/Direction', {
+                'train': train_dir,
+                'val': val_dir
+            }, epoch)
+            self.writer.add_scalars('Loss/StepUniformity', {
+                'train': train_step_uni,
+                'val': val_step_uni
+            }, epoch)
+            self.writer.add_scalars('Loss/Boundary', {
+                'train': train_boundary,
+                'val': val_boundary
+            }, epoch)
 
             # 学习率调整
             self.scheduler.step(val_loss)
 
             # 打印统计
             print(f"\nEpoch {epoch+1}/{self.config.NUM_EPOCHS}")
-            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, Endpoint: {train_ep:.4f}")
-            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, Endpoint: {val_ep:.4f}")
+            print(f"Train - Loss: {train_loss:.4f}, Recon: {train_recon:.4f}, KL: {train_kl:.4f}, "
+                  f"Endpoint: {train_ep:.4f}, Dir: {train_dir:.4f}")
+            print(f"Val   - Loss: {val_loss:.4f}, Recon: {val_recon:.4f}, KL: {val_kl:.4f}, "
+                  f"Endpoint: {val_ep:.4f}, Dir: {val_dir:.4f}")
 
             # Early Stopping 检查
             improvement = self.best_val_loss - val_loss
 
             if improvement > self.config.MIN_DELTA:
-                # 有显著改善
+                # 有显著改善，保存检查点
                 self.best_val_loss = val_loss
                 self.best_epoch = epoch
                 self.patience_counter = 0
-                self.save_checkpoint(epoch, is_best=True)
+                self.save_checkpoint(epoch)
                 print(f"✓ 保存最佳模型 (val_loss: {val_loss:.4f}, 改善: {improvement:.6f})")
             else:
                 # 没有显著改善
@@ -241,10 +299,6 @@ class Trainer:
                     print(f"{'='*60}\n")
                     break
 
-            # 定期保存检查点
-            if (epoch + 1) % 10 == 0:
-                self.save_checkpoint(epoch, is_best=False)
-
         # 训练结束总结
         print("\n" + "="*60)
         print("训练完成！")
@@ -254,8 +308,8 @@ class Trainer:
 
         self.writer.close()
 
-    def save_checkpoint(self, epoch, is_best=False):
-        """保存模型检查点"""
+    def save_checkpoint(self, epoch):
+        """保存模型检查点（单一检查点文件，不断覆盖）"""
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -265,11 +319,8 @@ class Trainer:
             'config': self.config
         }
 
-        if is_best:
-            torch.save(checkpoint, self.config.BEST_MODEL_PATH)
-        else:
-            path = os.path.join(self.config.MODEL_SAVE_PATH, f'checkpoint_epoch_{epoch+1}.pth')
-            torch.save(checkpoint, path)
+        # 只保存一个检查点文件，不断覆盖
+        torch.save(checkpoint, self.config.BEST_MODEL_PATH)
 
     def load_checkpoint(self, path):
         """加载模型检查点"""
