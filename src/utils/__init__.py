@@ -4,4 +4,7 @@
 
 from .trajectory_utils import TrajectoryExtractor, TrajectoryComparator
 
-__all__ = ['TrajectoryExtractor', 'TrajectoryComparator']
+__all__ = [
+    'TrajectoryExtractor',
+    'TrajectoryComparator'
+]

@@ -10,44 +10,26 @@ class Config:
     # 数据相关
     DATA_FILE = os.path.join(PROJECT_ROOT, 'mouse_trajectories.csv')
 
-    # 特征维度
-    # 输入特征: start_x, start_y, end_x, end_y, current_x, current_y, velocity, acceleration, sin_direction, cos_direction, distance, remaining_points
-    INPUT_DIM = 12  # 改为12维（新增remaining_points特征）
+    # 模型参数
+    FEAT_DIM = 5  # 特征维度：current_x, current_y, velocity, acceleration, direction
+    COND_DIM = 4  # 条件维度：start_x, start_y, end_x, end_y
+    LATENT_DIM = 16  # 潜在空间维度
+    HIDDEN_DIM = 128  # LSTM 隐藏层维度
 
-    # LSTM参数
-    LSTM_HIDDEN_DIM = 128
-    LSTM_NUM_LAYERS = 2
-    LSTM_DROPOUT = 0.2
-
-    # CVAE参数
-    LATENT_DIM = 32
-    ENCODER_HIDDEN_DIM = 128
-    DECODER_HIDDEN_DIM = 128
-
-    # 轨迹点数量预测网络参数
-    LENGTH_PREDICTOR_HIDDEN_DIM = 64
-    MAX_TRAJECTORY_LENGTH = 500  # 最大轨迹长度
+    # 数据参数
+    SEQ_LEN = 20  # 序列长度
 
     # 训练参数
     BATCH_SIZE = 32
     LEARNING_RATE = 0.001
-    NUM_EPOCHS = 300  # 最大训练轮数
+    NUM_EPOCHS = 100
     TRAIN_SPLIT = 0.8  # 训练集比例
 
-    # Early Stopping 参数
-    EARLY_STOPPING_PATIENCE = 15  # 连续15次不改善则停止训练
-    MIN_DELTA = 1e-4  # 最小改善阈值
-
     # 损失函数权重
-    KL_WEIGHT = 0.001  # KL散度权重（CVAE损失）- 降低以允许模型学习更真实的轨迹
-    ENDPOINT_WEIGHT = 2.0  # 终点损失权重 - 增加以确保到达终点
-    SMOOTHNESS_WEIGHT = 0.5  # 平滑度损失权重
-    DISTRIBUTION_WEIGHT = 1.0  # 分布损失权重（轨迹点分布一致性）- 降低避免过度约束
+    KLD_WEIGHT = 0.01  # KL 散度权重
 
-    # 几何约束损失权重（确保轨迹符合物理规律）
-    DIRECTION_WEIGHT = 3.0  # 方向一致性损失（确保朝向终点）- 增加到3.0
-    STEP_UNIFORMITY_WEIGHT = 2.0  # 步长均匀性损失（防止点聚集）- 增加到2.0
-    BOUNDARY_WEIGHT = 3.0  # 边界约束损失（防止偏离直线）- 增加到2.0
+    # Teacher Forcing
+    TEACHER_FORCING_RATIO = 0.5  # 训练时使用真值的概率
 
     # 模型保存路径
     MODEL_SAVE_PATH = os.path.join(PROJECT_ROOT, 'models/')
@@ -55,8 +37,3 @@ class Config:
 
     # 设备
     DEVICE = 'cuda'  # 'cuda' or 'cpu'
-
-    # 数据归一化参数（会在训练时计算）
-    NORMALIZE_COORDS = True
-    SCREEN_WIDTH = 1920
-    SCREEN_HEIGHT = 1080
