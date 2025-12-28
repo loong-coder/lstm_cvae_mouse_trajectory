@@ -152,44 +152,60 @@ class TrajectoryCVAE(nn.Module):
             pred_len = torch.round(pred_len).clamp(5, 50).int()
         return pred_len
 
-    def inference(self, c, seq_len=None, use_predicted_len=False, add_length_noise=True):
-        """推理模式：完全不需要真实轨迹，只需起点终点
+    def inference(self, c, add_length_noise=True):
+        """推理模式：根据起点终点生成轨迹
 
         Args:
-            c: 条件向量 [batch, 4]
-            seq_len: 序列长度（如果为None且use_predicted_len=False，使用默认值20）
-            use_predicted_len: 是否使用模型预测的序列长度
-            add_length_noise: 是否为预测长度添加随机噪声以增加多样性
+            c: 条件向量 [batch, 4] (start_x, start_y, end_x, end_y)
+            add_length_noise: 是否为预测长度添加随机噪声以增加多样性（默认True）
+
+        Returns:
+            生成的轨迹 [batch, seq_len, 6]
         """
         batch_size = c.size(0)
         device = c.device
 
-        # 决定使用的序列长度
-        if use_predicted_len:
-            pred_lens = self.predict_seq_len(c, add_noise=add_length_noise)  # [batch]
-            # 如果batch size = 1，直接使用预测值
-            if batch_size == 1:
-                seq_len = pred_lens[0].item()
-            else:
-                # batch size > 1，使用平均值（或者可以逐个生成）
-                seq_len = int(pred_lens.float().mean().item())
-        elif seq_len is None:
-            seq_len = 20  # 默认值
+        # 使用模型预测序列长度
+        pred_lens = self.predict_seq_len(c, add_noise=add_length_noise)  # [batch]
+
+        # 如果batch size = 1，直接使用预测值
+        if batch_size == 1:
+            seq_len = pred_lens[0].item()
+        else:
+            # batch size > 1，使用平均值
+            seq_len = int(pred_lens.float().mean().item())
 
         # 从标准正态分布中随机采样"风格"
         z = torch.randn(batch_size, self.latent_dim).to(device)
         z_c = torch.cat([z, c], dim=-1).unsqueeze(1)
 
-        # 从条件中提取起点坐标 (start_x, start_y)，速度、加速度、方向初始化为0，位置编码=0.0
+        # 计算起点到终点的直线距离（用作位置编码的参考距离）
         start_xy = c[:, 0:2]  # [batch, 2]
+        end_xy = c[:, 2:4]    # [batch, 2]
+        direct_distance = torch.sqrt(torch.sum((end_xy - start_xy) ** 2, dim=1))  # [batch]
+
+        # 初始化累积距离
+        cumulative_distance = torch.zeros(batch_size).to(device)  # [batch]
+
+        # 从条件中提取起点坐标，初始化特征
+        # ⚠️ 改进：初始化方向指向终点，速度设为小值（0.1），加速度为0
+        # 计算初始方向（从起点指向终点的角度）
+        dx = end_xy[:, 0] - start_xy[:, 0]
+        dy = end_xy[:, 1] - start_xy[:, 1]
+        initial_direction = torch.atan2(dy, dx)  # [batch]
+
         curr_input = torch.cat([
-            start_xy,
-            torch.zeros(batch_size, 3).to(device),  # velocity, acceleration, direction
-            torch.zeros(batch_size, 1).to(device)   # position_encoding (初始为0)
+            start_xy,  # current_x, current_y
+            torch.full((batch_size, 1), 0.1).to(device),  # velocity: 初始速度0.1
+            torch.zeros(batch_size, 1).to(device),  # acceleration: 0
+            initial_direction.unsqueeze(1),  # direction: 指向终点
+            torch.zeros(batch_size, 1).to(device)   # position_encoding: 起点为0
         ], dim=1).unsqueeze(1)  # [batch, 1, 6]
 
         outputs = []
         h_d, c_d = None, None
+        prev_xy = start_xy  # 记录上一步的坐标，用于计算移动距离
+
         for t in range(seq_len):
             dec_in = torch.cat([curr_input, z_c], dim=-1)
             # 第一次迭代时h_d和c_d是None，LSTM会自动初始化为0
@@ -199,12 +215,21 @@ class TrajectoryCVAE(nn.Module):
                 out, (h_d, c_d) = self.dec_lstm(dec_in, (h_d, c_d))
             pred = self.fc_out(out)  # [batch, 1, 6]
 
-            # 手动设置位置编码为当前进度 (t / seq_len)
-            # 这样模型在推理时也能知道当前在轨迹的什么阶段
-            pred[:, :, 5] = t / (seq_len - 1) if seq_len > 1 else 0  # 位置编码：0, 1/19, 2/19, ..., 1
+            # ⚠️ 关键改进：使用累积距离而不是线性时间步作为位置编码
+            # 计算当前步的移动距离
+            curr_xy = pred[:, 0, 0:2]  # [batch, 2]
+            if t > 0:
+                step_distance = torch.sqrt(torch.sum((curr_xy - prev_xy) ** 2, dim=1))  # [batch]
+                cumulative_distance = cumulative_distance + step_distance
+
+            # 计算位置编码：累积距离 / 直线距离
+            # 使用clamp确保在[0, 1]范围内（有时会超过1.0，因为轨迹不是直线）
+            position_encoding = (cumulative_distance / (direct_distance + 1e-8)).clamp(0, 1)  # [batch]
+            pred[:, 0, 5] = position_encoding  # 设置位置编码
 
             outputs.append(pred)
-            curr_input = pred # 推理时完全自回归
+            curr_input = pred  # 推理时完全自回归
+            prev_xy = curr_xy  # 更新上一步坐标
 
         return torch.cat(outputs, dim=1)
 

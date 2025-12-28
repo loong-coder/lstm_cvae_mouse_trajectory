@@ -6,7 +6,8 @@ import numpy as np
 import math
 
 class TrajectoryDataset(Dataset):
-    def __init__(self, csv_file, max_seq_len=50, min_seq_len=5, pixels_per_step=30):
+    def __init__(self, csv_file, max_seq_len=50, min_seq_len=5,
+                 screen_width=1920, screen_height=1080):
         """
         初始化数据集，支持变长序列
 
@@ -14,13 +15,15 @@ class TrajectoryDataset(Dataset):
             csv_file: 数据文件路径
             max_seq_len: 最大序列长度（默认50）
             min_seq_len: 最小序列长度（默认5）
-            pixels_per_step: 每步平均像素数，用于计算目标序列长度（默认30）
+            screen_width: 屏幕宽度，用于归一化（默认1920）
+            screen_height: 屏幕高度，用于归一化（默认1080）
         """
         # 读取数据
         df = pd.read_csv(csv_file)
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
-        self.pixels_per_step = pixels_per_step
+        self.screen_width = screen_width
+        self.screen_height = screen_height
 
         # 1. 提取特征列
         # 输入特征：当前坐标(x,y)、速度、加速度、方向、位置编码。维度 = 6
@@ -32,18 +35,23 @@ class TrajectoryDataset(Dataset):
         # 鼠标移动的加速度通常在 [-1000, 1000] 范围内
         df['acceleration'] = df['acceleration'].clip(-1000, 1000)
 
-        # 2. 归一化（使用RobustScaler对异常值更鲁棒）
-        # RobustScaler使用中位数和四分位数，不受极端值影响
-        self.feat_scaler = RobustScaler()
-        self.cond_scaler = RobustScaler()
+        # 2. 归一化
+        # ⚠️ 关键修复：坐标使用简单归一化，与推理时保持一致
+        # 速度、加速度、方向使用RobustScaler（对异常值鲁棒）
+        self.velocity_scaler = RobustScaler()
 
-        # 对整个数据集进行拟合和转换
-        scaled_feats = self.feat_scaler.fit_transform(df[self.feat_cols])
-        scaled_conds = self.cond_scaler.fit_transform(df[self.cond_cols])
+        # 坐标归一化：简单除以屏幕尺寸
+        df['current_x'] = df['current_x'] / screen_width
+        df['current_y'] = df['current_y'] / screen_height
+        df['start_x'] = df['start_x'] / screen_width
+        df['start_y'] = df['start_y'] / screen_height
+        df['end_x'] = df['end_x'] / screen_width
+        df['end_y'] = df['end_y'] / screen_height
 
-        # 将归一化后的数据放回 DataFrame 方便按 group_id 分组
-        df[self.feat_cols] = scaled_feats
-        df[self.cond_cols] = scaled_conds
+        # 速度、加速度、方向使用RobustScaler
+        velocity_features = df[['velocity', 'acceleration', 'direction']].values
+        scaled_velocity_features = self.velocity_scaler.fit_transform(velocity_features)
+        df[['velocity', 'acceleration', 'direction']] = scaled_velocity_features
 
         self.sequences = []
         self.conditions = []
@@ -51,32 +59,48 @@ class TrajectoryDataset(Dataset):
 
         # 3. 按 group_id 组织序列
         for _, group in df.groupby('group_id'):
-            # 获取起点终点（使用原始未归一化的坐标计算距离）
-            cond_data = group[self.cond_cols].values[0]  # [4] 归一化后的条件
+            # 获取起点终点（归一化后的坐标）
+            cond_data = group[self.cond_cols].values[0]  # [4] 归一化后的条件 [0-1]
 
-            # 需要原始坐标来计算目标长度
-            # 注意：这里需要逆变换获取原始坐标
-            original_cond = self.cond_scaler.inverse_transform(cond_data.reshape(1, -1))[0]
-            start = (original_cond[0], original_cond[1])
-            end = (original_cond[2], original_cond[3])
-
-            # 计算根据距离应该有的序列长度（目标长度）
-            target_seq_len = self.calculate_seq_len(start, end, self.pixels_per_step)
-
-            # 使用实际数据长度和目标长度的较小值（但不小于min_seq_len）
             actual_len = len(group)
-            seq_len = max(self.min_seq_len, min(actual_len, target_seq_len, self.max_seq_len))
 
             # 如果数据太短，跳过
             if actual_len < self.min_seq_len:
                 continue
 
-            # 截取到计算出的长度
-            seq_data = group[self.feat_cols].values[:seq_len]  # [seq_len, 5]
+            # ⚠️ 关键修复：不再截断轨迹！
+            # 如果轨迹太长（超过 max_seq_len），从末尾往回取 max_seq_len 个点
+            # 这样可以确保终点始终在轨迹中
+            if actual_len > self.max_seq_len:
+                # 从末尾往前取 max_seq_len 个点
+                seq_data = group[self.feat_cols].values[-self.max_seq_len:]  # [max_seq_len, 5]
+                seq_len = self.max_seq_len
+            else:
+                # 使用完整轨迹
+                seq_data = group[self.feat_cols].values  # [actual_len, 5]
+                seq_len = actual_len
 
-            # 添加位置编码：归一化的时间步 [0, 1/(seq_len-1), ..., 1]
-            # 让模型知道当前在轨迹的什么阶段（开始/中间/结束）
-            position_encoding = np.linspace(0, 1, seq_len).reshape(-1, 1)  # [seq_len, 1]
+            # ⚠️ 关键修复：使用累积距离而不是线性时间步作为位置编码
+            # 这样位置编码反映"空间进度"而不是"时间进度"
+            # 计算每个点的累积移动距离
+            cumulative_distances = [0.0]  # 起点距离为0
+            coords = seq_data[:, 0:2]  # 提取 (x, y) 坐标
+            for i in range(1, seq_len):
+                # 计算当前点与前一个点的距离
+                step_dist = np.sqrt(
+                    (coords[i, 0] - coords[i-1, 0]) ** 2 +
+                    (coords[i, 1] - coords[i-1, 1]) ** 2
+                )
+                cumulative_distances.append(cumulative_distances[-1] + step_dist)
+
+            # 归一化到 [0, 1]
+            total_distance = cumulative_distances[-1]
+            if total_distance > 0:
+                position_encoding = np.array(cumulative_distances).reshape(-1, 1) / total_distance
+            else:
+                # 如果总距离为0（所有点重合），使用线性编码作为后备
+                position_encoding = np.linspace(0, 1, seq_len).reshape(-1, 1)
+
             seq_data_with_pos = np.concatenate([seq_data, position_encoding], axis=1)  # [seq_len, 6]
 
             self.sequences.append(torch.FloatTensor(seq_data_with_pos))

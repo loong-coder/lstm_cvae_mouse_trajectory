@@ -20,6 +20,8 @@ class Config:
     MAX_SEQ_LEN = 50  # 最大序列长度
     MIN_SEQ_LEN = 5   # 最小序列长度
     PIXELS_PER_STEP = 30  # 每步平均像素数，用于计算目标序列长度
+    SCREEN_WIDTH = 1920   # 屏幕宽度（用于归一化）
+    SCREEN_HEIGHT = 1080  # 屏幕高度（用于归一化）
 
     # 训练参数
     BATCH_SIZE = 32

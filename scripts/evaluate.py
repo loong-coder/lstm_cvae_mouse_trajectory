@@ -147,22 +147,14 @@ class ModelInference:
         self,
         start_point: Tuple[float, float],
         end_point: Tuple[float, float],
-        seq_len: Optional[int] = None,
-        num_samples: int = 1,
-        auto_calculate: bool = False,
-        use_model_prediction: bool = False,
-        pixels_per_step: float = 30.0
+        num_samples: int = 1
     ) -> List[np.ndarray]:
         """生成轨迹（归一化坐标）
 
         Args:
             start_point: (x, y) 起点坐标（归一化）
             end_point: (x, y) 终点坐标（归一化）
-            seq_len: 序列长度，如果为None则根据其他参数决定
             num_samples: 生成的轨迹数量
-            auto_calculate: 是否使用公式根据距离自动计算点数
-            use_model_prediction: 是否使用模型预测的长度（优先级最高）
-            pixels_per_step: 每步移动的平均像素数（用于公式计算）
 
         Returns:
             List[(seq_len, 2)] 生成的轨迹坐标列表（归一化）
@@ -177,40 +169,13 @@ class ModelInference:
         trajectories = []
 
         with torch.no_grad():
-            for _ in range(num_samples):
-                # 决定序列长度的优先级：
-                # 1. 使用模型预测（如果启用）
-                # 2. 使用指定的 seq_len
-                # 3. 使用公式自动计算（如果启用）
-                # 4. 使用默认值
+            for i in range(num_samples):
+                # 使用模型预测长度（带随机噪声以增加多样性）
+                generated = self.model.inference(condition, add_length_noise=True)
+                actual_seq_len = generated.shape[1]
 
-                if use_model_prediction:
-                    # 使用模型预测长度
-                    generated = self.model.inference(condition, use_predicted_len=True)
-                    actual_seq_len = generated.shape[1]
-                    print(f"  模型预测点数: {actual_seq_len} 个点")
-                elif seq_len is not None:
-                    # 使用指定长度
-                    generated = self.model.inference(condition, seq_len=seq_len, use_predicted_len=False)
-                    actual_seq_len = seq_len
-                elif auto_calculate:
-                    # 使用公式计算长度
-                    calculated_len = TrajectoryCVAE.calculate_seq_len(
-                        start=start_point,
-                        end=end_point,
-                        pixels_per_step=pixels_per_step
-                    )
-                    generated = self.model.inference(condition, seq_len=calculated_len, use_predicted_len=False)
-                    actual_seq_len = calculated_len
-                    print(f"  公式计算点数: {actual_seq_len} 个点")
-                else:
-                    # 使用默认长度
-                    default_len = getattr(self.config, 'SEQ_LEN', 20)  # 兼容旧配置
-                    if not hasattr(self.config, 'SEQ_LEN'):
-                        # 如果使用新配置，尝试使用 MAX_SEQ_LEN 的一半作为默认值
-                        default_len = getattr(self.config, 'MAX_SEQ_LEN', 50) // 2
-                    generated = self.model.inference(condition, seq_len=default_len, use_predicted_len=False)
-                    actual_seq_len = default_len
+                if i == 0:  # 只在第一次打印
+                    print(f"  模型预测点数范围: ~{actual_seq_len} 个点（每条轨迹略有不同）")
 
                 # 提取坐标 (current_x, current_y)
                 coords = generated[0, :, 0:2].cpu().numpy()  # (actual_seq_len, 2)
@@ -419,63 +384,37 @@ class TrajectoryEvaluator:
         self,
         start: Tuple[float, float],
         end: Tuple[float, float],
-        seq_len: Optional[int] = None,
         num_samples: int = 1,
-        return_raw: bool = False,
-        auto_seq_len: bool = False,
-        use_model_prediction: bool = True,
-        pixels_per_step: float = 30.0
+        return_raw: bool = False
     ) -> List[np.ndarray]:
-        """生成轨迹
+        """生成轨迹（使用模型预测的序列长度）
 
         Args:
             start: (x, y) 起点坐标
             end: (x, y) 终点坐标
-            seq_len: 序列长度（如果指定则优先使用）
             num_samples: 生成的轨迹数量
             return_raw: 是否返回原始坐标（True）还是归一化坐标（False）
-            use_model_prediction: 是否使用模型预测的长度（默认True，推荐）
-            auto_seq_len: 是否使用公式根据起终点距离自动计算点数（默认False）
-            pixels_per_step: 每步移动的平均像素数（用于公式计算）
 
         Returns:
             List[(N, 2)] 轨迹坐标列表
 
         注意：
-            序列长度决定优先级：
-            1. seq_len（如果指定）
-            2. use_model_prediction（如果启用且seq_len未指定）
-            3. auto_seq_len（如果启用且前两者都未使用）
-            4. 默认值
+            - 序列长度由模型自动预测
+            - 每条轨迹的点数会略有不同（±10%随机噪声）
         """
         # 坐标归一化（如果需要）
         if not self.use_normalized:
             start_norm = self.normalizer.normalize(start)
             end_norm = self.normalizer.normalize(end)
-            # 自动计算时使用原始坐标计算距离
-            start_for_calc = start
-            end_for_calc = end
         else:
             start_norm = start
             end_norm = end
-            # 归一化坐标需要转换为像素坐标计算距离
-            start_for_calc = self.normalizer.denormalize(start)
-            end_for_calc = self.normalizer.denormalize(end)
 
-        # 决定使用哪种长度计算方式
-        # 优先级：指定长度 > 模型预测 > 公式计算 > 默认值
-        use_model_pred = use_model_prediction and (seq_len is None)
-        auto_calculate = auto_seq_len and (seq_len is None) and (not use_model_pred)
-
-        # 生成轨迹
+        # 生成轨迹（使用模型预测长度）
         trajectories = self.model_inference.generate_trajectories(
             start_point=start_norm,
             end_point=end_norm,
-            seq_len=seq_len,
-            num_samples=num_samples,
-            auto_calculate=auto_calculate,
-            use_model_prediction=use_model_pred,
-            pixels_per_step=pixels_per_step
+            num_samples=num_samples
         )
 
         # 坐标反归一化（如果需要）
@@ -554,13 +493,12 @@ def main():
     print(f"\n起点: {start_point}")
     print(f"终点: {end_point}")
 
-    # 3. 生成轨迹
+    # 3. 生成轨迹（使用模型预测长度）
     print(f"\n正在生成 5 条轨迹...")
     trajectories = evaluator.generate(
         start=start_point,
         end=end_point,
         num_samples=5,
-        auto_seq_len=True,
         return_raw=True  # 返回原始坐标
     )
 

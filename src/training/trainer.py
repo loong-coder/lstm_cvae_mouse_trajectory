@@ -23,7 +23,8 @@ class Trainer:
             config.DATA_FILE,
             max_seq_len=config.MAX_SEQ_LEN,
             min_seq_len=config.MIN_SEQ_LEN,
-            pixels_per_step=config.PIXELS_PER_STEP
+            screen_width=config.SCREEN_WIDTH,
+            screen_height=config.SCREEN_HEIGHT
         )
 
         # 划分训练集和验证集
